@@ -140,7 +140,7 @@ class AutoMouse:
         if not TRAY_AVAILABLE:
             return None
 
-        def get_status():
+        def get_status(item):
             if self.state_machine:
                 return f"Status: {self.state_machine.state.name}"
             return "Status: Unknown"
