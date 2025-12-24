@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "automouse"
+version = "0.1.0"
+description = "Host-level cooperative HID fabric for cross-device layer state"
+requires-python = ">=3.9"
+dependencies = [
+    "pynput>=1.7.6",
+    "hidapi>=0.14.0",
+    "pystray>=0.19.5",
+    "Pillow>=10.0.0",
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+automouse = "automouse.main:main"
+
+[project.gui-scripts]
+automouse-gui = "automouse.main:main"
