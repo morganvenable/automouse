@@ -7,11 +7,14 @@ States:
 - latched: Layer persists until explicitly exited
 """
 
+import logging
 import time
 import threading
 from enum import Enum, auto
 from typing import Callable, Optional, List
 from dataclasses import dataclass
+
+log = logging.getLogger(__name__)
 
 
 class LayerState(Enum):
@@ -82,8 +85,8 @@ class LayerStateMachine:
         for listener in self._listeners:
             try:
                 listener(change)
-            except Exception:
-                pass  # Don't let listener errors break state machine
+            except Exception as e:
+                log.error(f"Error in state change listener: {e}")
 
     def _cancel_timer(self):
         """Cancel any pending timeout timer."""

@@ -4,6 +4,7 @@ AutoMouse - Main entry point and system tray daemon.
 
 import sys
 import os
+import logging
 import threading
 from pathlib import Path
 from typing import Optional
@@ -19,7 +20,15 @@ except ImportError:
 from .config import load_config, get_config_path, Config
 from .state import LayerStateMachine, LayerState, StateChange
 from .keyboard import KeyboardController
-from .hid_monitor import enumerate_pointing_devices, HID_AVAILABLE
+from .hid_monitor import enumerate_pointing_devices, enumerate_all_devices, HID_AVAILABLE
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s: %(message)s',
+    datefmt='%H:%M:%S'
+)
+log = logging.getLogger(__name__)
 
 
 class AutoMouse:
@@ -34,6 +43,7 @@ class AutoMouse:
 
     def load_config(self):
         """Load or create configuration."""
+        log.info("Loading configuration...")
         self.config = load_config()
 
         # Get layer config (use first layer or default)
@@ -53,6 +63,9 @@ class AutoMouse:
                 'i': 'mouse_scroll_down',
             }
             exit_on_unmapped = True
+
+        log.info(f"Layer config: timeout={timeout}ms, exit_on_unmapped={exit_on_unmapped}")
+        log.info(f"Key mappings: {mappings}")
 
         # Initialize state machine
         self.state_machine = LayerStateMachine(timeout_ms=timeout)
@@ -85,6 +98,8 @@ class AutoMouse:
 
     def _on_state_change(self, change: StateChange):
         """Called when layer state changes."""
+        log.info(f"State change: {change.old_state.name} -> {change.new_state.name} (reason: {change.reason})")
+
         if self.keyboard:
             is_active = change.new_state in (
                 LayerState.MOUSE_LAYER_ACTIVE,
@@ -94,10 +109,6 @@ class AutoMouse:
 
         # Update tray icon if available
         self._update_tray_icon()
-
-        # Log state change
-        state_name = change.new_state.name
-        print(f"Layer state: {state_name} (reason: {change.reason})")
 
     def _create_icon(self, active: bool = False) -> 'Image.Image':
         """Create tray icon image."""
@@ -132,8 +143,8 @@ class AutoMouse:
                 self.state_machine.state != LayerState.NORMAL
             )
             self.tray.icon = self._create_icon(active=is_active)
-        except Exception:
-            pass
+        except Exception as e:
+            log.error(f"Error updating tray icon: {e}")
 
     def _create_menu(self):
         """Create the system tray menu."""
@@ -147,6 +158,7 @@ class AutoMouse:
 
         def open_config(icon, item):
             config_path = get_config_path()
+            log.info(f"Opening config: {config_path}")
             if sys.platform == 'win32':
                 os.startfile(config_path)
             elif sys.platform == 'darwin':
@@ -155,19 +167,41 @@ class AutoMouse:
                 os.system(f'xdg-open "{config_path}"')
 
         def reload_config(icon, item):
+            log.info("Reloading configuration...")
             self.load_config()
-            print("Configuration reloaded")
+            log.info("Configuration reloaded")
 
         def show_devices(icon, item):
-            devices = enumerate_pointing_devices()
-            if devices:
-                print("\nConnected pointing devices:")
-                for d in devices:
-                    print(f"  {d.product or 'Unknown'} (VID:{d.vid:04x} PID:{d.pid:04x})")
+            log.info("Enumerating HID devices...")
+            print("\n" + "="*60)
+            print("HID DEVICE ENUMERATION")
+            print("="*60)
+
+            if not HID_AVAILABLE:
+                print("WARNING: hidapi not available. Install with: pip install hidapi")
+                print("On Windows, you may also need to install hidapi DLL.")
             else:
-                print("\nNo pointing devices found (or hidapi not available)")
+                # Show all HID devices
+                all_devices = enumerate_all_devices()
+                if all_devices:
+                    print(f"\nFound {len(all_devices)} HID devices:")
+                    for d in all_devices:
+                        is_mouse = d.is_pointing_device
+                        marker = " [POINTING DEVICE]" if is_mouse else ""
+                        name = d.product or d.manufacturer or "Unknown"
+                        print(f"  {name}{marker}")
+                        print(f"    VID:0x{d.vid:04X} PID:0x{d.pid:04X}")
+                        print(f"    Usage Page: 0x{d.usage_page:04X} Usage: 0x{d.usage:02X}")
+                else:
+                    print("\nNo HID devices found.")
+                    print("This may be normal on Windows - mice are often exclusively owned by the OS.")
+
+            print("\nNote: AutoMouse uses pynput for mouse activity detection,")
+            print("which works with any mouse without needing raw HID access.")
+            print("="*60 + "\n")
 
         def quit_app(icon, item):
+            log.info("Quit requested from tray menu")
             self.stop()
 
         return pystray.Menu(
@@ -184,6 +218,10 @@ class AutoMouse:
         """Start the daemon."""
         self._running = True
 
+        log.info("="*60)
+        log.info("AutoMouse starting...")
+        log.info("="*60)
+
         # Load configuration
         self.load_config()
 
@@ -191,15 +229,20 @@ class AutoMouse:
         if self.keyboard:
             self.keyboard.start()
 
-        print("AutoMouse started")
-        print(f"Config: {get_config_path()}")
+        config_path = get_config_path()
+        log.info(f"Config file: {config_path}")
+        print(f"\nAutoMouse started!")
+        print(f"Config: {config_path}")
         if self.config and self.config.layers:
             layer = list(self.config.layers.values())[0]
             print(f"Timeout: {layer.timeout_ms}ms")
             print(f"Mappings: {list(layer.mappings.keys())}")
+        print("\nMove your mouse to activate the layer, then press mapped keys.")
+        print("Check the console for detailed logs.\n")
 
         # Start system tray if available
         if TRAY_AVAILABLE:
+            log.info("Starting system tray...")
             self.tray = pystray.Icon(
                 'automouse',
                 self._create_icon(active=False),
@@ -208,7 +251,7 @@ class AutoMouse:
             )
             self.tray.run()  # This blocks until quit
         else:
-            print("System tray not available, running in console mode")
+            log.warning("System tray not available, running in console mode")
             print("Press Ctrl+C to quit")
             try:
                 while self._running:
@@ -220,6 +263,7 @@ class AutoMouse:
 
     def stop(self):
         """Stop the daemon."""
+        log.info("Stopping AutoMouse...")
         self._running = False
 
         if self.keyboard:
@@ -228,7 +272,7 @@ class AutoMouse:
         if self.tray:
             self.tray.stop()
 
-        print("AutoMouse stopped")
+        log.info("AutoMouse stopped")
 
 
 def main():
@@ -240,7 +284,7 @@ def main():
     except KeyboardInterrupt:
         app.stop()
     except Exception as e:
-        print(f"Error: {e}")
+        log.exception(f"Fatal error: {e}")
         sys.exit(1)
 
 
