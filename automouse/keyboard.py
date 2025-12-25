@@ -57,6 +57,7 @@ class KeyboardController:
         self._mappings: Dict[str, MouseAction] = {}
         self._mouse_listener = None
         self._mouse_controller = mouse.Controller()
+        self._raw_input_monitor = None
 
         self._layer_active = False
         self._exit_on_unmapped = True
@@ -67,6 +68,9 @@ class KeyboardController:
         self._on_mouse_activity: Optional[Callable[[], None]] = None
         self._on_mapped_key: Optional[Callable[[], None]] = None
         self._on_unmapped_key: Optional[Callable[[], None]] = None
+
+        # Device filter - callback(vidpid) -> bool, returns True if device should trigger layer
+        self._device_filter: Optional[Callable[[str], bool]] = None
 
         # Worker thread for slow operations
         self._action_queue: queue.Queue = queue.Queue()
@@ -104,6 +108,10 @@ class KeyboardController:
 
     def set_exit_on_unmapped(self, exit_on_unmapped: bool):
         self._exit_on_unmapped = exit_on_unmapped
+
+    def set_device_filter(self, filter_callback: Optional[Callable[[str], bool]]):
+        """Set a device filter callback. Called with VID:PID string, returns True if device should trigger layer."""
+        self._device_filter = filter_callback
 
     def _register_hotkeys(self):
         """Register hotkeys for mapped keys when layer is active."""
@@ -187,6 +195,13 @@ class KeyboardController:
                     self._do_mouse_action(action, pressed=False)
 
                 elif cmd == 'mouse_activity':
+                    vidpid = item[1] if len(item) > 1 else None
+
+                    # Apply device filter if set
+                    if vidpid and self._device_filter:
+                        if not self._device_filter(vidpid):
+                            continue  # Device not enabled, skip
+
                     if self._on_mouse_activity:
                         self._on_mouse_activity()
 
@@ -220,24 +235,38 @@ class KeyboardController:
 
     def _on_mouse_move(self, x, y):
         try:
-            self._action_queue.put_nowait(('mouse_activity',))
+            self._action_queue.put_nowait(('mouse_activity', None))
         except:
             pass
 
     def _on_mouse_click(self, x, y, button, pressed):
         try:
-            self._action_queue.put_nowait(('mouse_activity',))
+            self._action_queue.put_nowait(('mouse_activity', None))
         except:
             pass
 
     def _on_mouse_scroll(self, x, y, dx, dy):
         try:
-            self._action_queue.put_nowait(('mouse_activity',))
+            self._action_queue.put_nowait(('mouse_activity', None))
+        except:
+            pass
+
+    def _on_raw_input_activity(self, device_path: str):
+        """Called when Raw Input detects mouse activity with device path."""
+        import re
+        try:
+            # Extract VID:PID from path like \\?\HID#VID_046D&PID_C52B&...
+            match = re.search(r'VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})', device_path)
+            if match:
+                vidpid = f"{match.group(1).upper()}:{match.group(2).upper()}"
+                self._action_queue.put_nowait(('mouse_activity', vidpid))
         except:
             pass
 
     def start(self):
         """Start listeners."""
+        import sys
+
         self._running = True
 
         # Start worker thread
@@ -248,14 +277,27 @@ class KeyboardController:
         # Instead, hotkeys are registered dynamically when layer becomes active.
         log.info("Keyboard controller started (hotkeys registered on layer activation)")
 
-        # Mouse listener (pynput - just for monitoring)
-        self._mouse_listener = mouse.Listener(
-            on_move=self._on_mouse_move,
-            on_click=self._on_mouse_click,
-            on_scroll=self._on_mouse_scroll
-        )
-        self._mouse_listener.start()
-        log.info("Mouse listener started")
+        # Try to use Raw Input on Windows for per-device detection
+        use_raw_input = False
+        if sys.platform == 'win32':
+            try:
+                from .rawinput import RawInputMonitor
+                self._raw_input_monitor = RawInputMonitor(self._on_raw_input_activity)
+                self._raw_input_monitor.start()
+                use_raw_input = True
+                log.info("Using Windows Raw Input for per-device mouse detection")
+            except Exception as e:
+                log.warning(f"Failed to start Raw Input monitor: {e}")
+
+        # Fallback to pynput if Raw Input not available
+        if not use_raw_input:
+            self._mouse_listener = mouse.Listener(
+                on_move=self._on_mouse_move,
+                on_click=self._on_mouse_click,
+                on_scroll=self._on_mouse_scroll
+            )
+            self._mouse_listener.start()
+            log.info("Mouse listener started (pynput fallback, no per-device filtering)")
 
     def stop(self):
         """Stop listeners."""
@@ -263,6 +305,10 @@ class KeyboardController:
         self._running = False
 
         self._unregister_hotkeys()
+
+        if self._raw_input_monitor:
+            self._raw_input_monitor.stop()
+            self._raw_input_monitor = None
 
         if self._mouse_listener:
             self._mouse_listener.stop()

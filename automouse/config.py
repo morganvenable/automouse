@@ -10,6 +10,15 @@ from typing import Dict, List, Optional
 
 
 @dataclass
+class KnownDevice:
+    """A device that has been seen and can trigger the layer."""
+    vid: int
+    pid: int
+    name: str = ""
+    enabled: bool = True  # Whether this device triggers the autolayer
+
+
+@dataclass
 class DeviceConfig:
     """Configuration for a single HID device."""
     vid: int
@@ -31,6 +40,7 @@ class Config:
     """Main application configuration."""
     devices: Dict[str, DeviceConfig] = field(default_factory=dict)
     layers: Dict[str, LayerConfig] = field(default_factory=dict)
+    known_devices: Dict[str, KnownDevice] = field(default_factory=dict)  # VID:PID -> KnownDevice
 
     # Global settings
     any_pointing_device: bool = True  # Use any mouse/trackball as trigger
@@ -91,6 +101,22 @@ def load_config(path: Optional[Path] = None) -> Config:
             exit_on_other_key=layer_data.get('exit_on_other_key', True)
         )
 
+    # Parse known devices (VID:PID -> settings)
+    for vidpid, dev_data in data.get('known_devices', {}).items():
+        # Parse VID:PID string like "093A:2510"
+        try:
+            vid_str, pid_str = vidpid.split(':')
+            vid = int(vid_str, 16)
+            pid = int(pid_str, 16)
+            config.known_devices[vidpid] = KnownDevice(
+                vid=vid,
+                pid=pid,
+                name=dev_data.get('name', ''),
+                enabled=dev_data.get('enabled', True)
+            )
+        except (ValueError, AttributeError):
+            pass  # Skip malformed entries
+
     # Global settings
     config.any_pointing_device = data.get('any_pointing_device', True)
     config.any_keyboard = data.get('any_keyboard', True)
@@ -146,7 +172,8 @@ def save_config(config: Config, path: Optional[Path] = None):
         'any_pointing_device': config.any_pointing_device,
         'any_keyboard': config.any_keyboard,
         'devices': {},
-        'layers': {}
+        'layers': {},
+        'known_devices': {}
     }
 
     for name, dev in config.devices.items():
@@ -162,6 +189,13 @@ def save_config(config: Config, path: Optional[Path] = None):
             'timeout_ms': layer.timeout_ms,
             'mappings': layer.mappings,
             'exit_on_other_key': layer.exit_on_other_key
+        }
+
+    # Save known devices with their enabled state
+    for vidpid, dev in config.known_devices.items():
+        data['known_devices'][vidpid] = {
+            'name': dev.name,
+            'enabled': dev.enabled
         }
 
     path.parent.mkdir(parents=True, exist_ok=True)

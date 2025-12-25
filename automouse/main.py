@@ -38,19 +38,28 @@ def show_devices_dialog():
     import time
     import re
     import sys
+    from .config import load_config, save_config, KnownDevice
+
+    # Load current config
+    config = load_config()
 
     # Track activity per device - key is tree item id, value is last activity time
     device_activity = {}  # {item_id: last_activity_time}
     dialog_open = [True]
     raw_input_monitor = None
 
-    # Mapping from VID:PID to tree item id
+    # Mapping from VID:PID to tree item id and vice versa
     vidpid_to_item = {}  # {"046D:C52B": item_id}
+    item_to_vidpid = {}  # {item_id: "046D:C52B"}
+    item_to_name = {}    # {item_id: "Device Name"}
+
+    # Track which devices have been seen active (for showing checkboxes)
+    seen_active = set(config.known_devices.keys())  # Start with previously known devices
 
     # Create window
     root = tk.Tk()
     root.title("AutoMouse - HID Devices")
-    root.geometry("650x500")
+    root.geometry("750x500")
     root.resizable(True, True)
 
     # Configure tag styles for highlighting active devices
@@ -69,15 +78,17 @@ def show_devices_dialog():
     tree_frame = ttk.Frame(main_frame)
     tree_frame.pack(fill=tk.BOTH, expand=True)
 
-    # Create treeview for device list with activity column
-    columns = ('activity', 'name', 'type', 'vid_pid')
+    # Create treeview with enabled column
+    columns = ('enabled', 'activity', 'name', 'type', 'vid_pid')
     tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=12)
 
+    tree.heading('enabled', text='Layer')
     tree.heading('activity', text='Activity')
     tree.heading('name', text='Device Name')
     tree.heading('type', text='Type')
     tree.heading('vid_pid', text='VID:PID')
 
+    tree.column('enabled', width=50, anchor='center')
     tree.column('activity', width=80, anchor='center')
     tree.column('name', width=280)
     tree.column('type', width=120)
@@ -86,6 +97,7 @@ def show_devices_dialog():
     # Configure tags for active/inactive states
     tree.tag_configure('active', background='#90EE90')  # Light green
     tree.tag_configure('inactive', background='')
+    tree.tag_configure('known', background='#E8F5E9')   # Very light green for known devices
 
     # Add scrollbar
     scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
@@ -95,19 +107,94 @@ def show_devices_dialog():
     tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
+    def get_enabled_display(vidpid_key):
+        """Get the display string for the enabled column."""
+        if vidpid_key not in seen_active:
+            return ''  # Not seen yet, no checkbox
+        if vidpid_key in config.known_devices:
+            return '☑' if config.known_devices[vidpid_key].enabled else '☐'
+        return '☑'  # Default to enabled for newly seen devices
+
+    def toggle_enabled(event):
+        """Toggle the enabled state when clicking on the enabled column."""
+        region = tree.identify("region", event.x, event.y)
+        if region != "cell":
+            return
+
+        column = tree.identify_column(event.x)
+        if column != '#1':  # First column (enabled)
+            return
+
+        item_id = tree.identify_row(event.y)
+        if not item_id or item_id not in item_to_vidpid:
+            return
+
+        vidpid_key = item_to_vidpid[item_id]
+        if vidpid_key not in seen_active:
+            return  # Can't toggle if not seen yet
+
+        # Toggle the state
+        if vidpid_key in config.known_devices:
+            config.known_devices[vidpid_key].enabled = not config.known_devices[vidpid_key].enabled
+        else:
+            # First toggle - add to known devices as disabled
+            name = item_to_name.get(item_id, '')
+            vid_str, pid_str = vidpid_key.split(':')
+            config.known_devices[vidpid_key] = KnownDevice(
+                vid=int(vid_str, 16),
+                pid=int(pid_str, 16),
+                name=name,
+                enabled=False
+            )
+
+        # Update display
+        tree.set(item_id, 'enabled', get_enabled_display(vidpid_key))
+
+        # Save config
+        save_config(config)
+        log.info(f"Toggled device {vidpid_key} enabled={config.known_devices[vidpid_key].enabled}")
+
+    tree.bind('<Button-1>', toggle_enabled)
+
     # Debug status label
     debug_var = tk.StringVar(value="Initializing...")
     debug_label = tk.Label(main_frame, textvariable=debug_var, font=('Consolas', 9), fg='blue')
     debug_label.pack(pady=(5, 0))
 
-    # Populate with ALL HID devices
+    def add_device_to_tree(vidpid_key, name, device_type, at_top=False):
+        """Add a device to the tree, optionally at the top."""
+        vid_display = f"0x{vidpid_key.replace(':', ':0x')}"
+        enabled_display = get_enabled_display(vidpid_key)
+
+        if at_top:
+            item_id = tree.insert('', 0, values=(enabled_display, '', name, device_type, vid_display))
+        else:
+            item_id = tree.insert('', tk.END, values=(enabled_display, '', name, device_type, vid_display))
+
+        device_activity[item_id] = 0.0
+        vidpid_to_item[vidpid_key] = item_id
+        item_to_vidpid[item_id] = vidpid_key
+        item_to_name[item_id] = name
+        return item_id
+
+    # First, add known devices (from config) at the top
+    known_vidpids = set()
+    for vidpid_key, known_dev in config.known_devices.items():
+        name = known_dev.name or f"Device ({vidpid_key})"
+        add_device_to_tree(vidpid_key, name, "Mouse/Pointer", at_top=False)
+        known_vidpids.add(vidpid_key)
+        log.debug(f"Added known device: {vidpid_key} ({name})")
+
+    # Then add other HID devices
     if not HID_AVAILABLE:
-        tree.insert('', tk.END, values=(
-            '',
-            'hidapi not available',
-            '',
-            'pip install hidapi'
-        ))
+        if not known_vidpids:
+            tree.insert('', tk.END, values=(
+                '',
+                '',
+                'hidapi not available',
+                '',
+                'pip install hidapi'
+            ))
     else:
         devices = enumerate_all_devices()
         if devices:
@@ -122,46 +209,73 @@ def show_devices_dialog():
                 device_map[key].append(d)
 
             for (name, vid_pid), dev_list in device_map.items():
-                # Check if any is a pointing device
-                is_pointer = any(d.is_pointing_device for d in dev_list)
-                device_type = "Mouse/Pointer" if is_pointer else "Other HID"
-
-                item_id = tree.insert('', tk.END, values=('', name, device_type, vid_pid))
-                device_activity[item_id] = 0.0
-
-                # Map VID:PID (without 0x prefix, uppercase) to item for Raw Input matching
-                # vid_pid is like "0x046D:0x0C52" -> we want "046D:C052"
                 vid = dev_list[0].vid
                 pid = dev_list[0].pid
                 vidpid_key = f"{vid:04X}:{pid:04X}"
-                vidpid_to_item[vidpid_key] = item_id
-                log.debug(f"Mapped {vidpid_key} -> {item_id} ({name})")
-        else:
+
+                # Skip if already added as known device
+                if vidpid_key in known_vidpids:
+                    continue
+
+                is_pointer = any(d.is_pointing_device for d in dev_list)
+                device_type = "Mouse/Pointer" if is_pointer else "Other HID"
+                add_device_to_tree(vidpid_key, name, device_type)
+        elif not known_vidpids:
             tree.insert('', tk.END, values=(
+                '',
                 '',
                 'No HID devices found',
                 '',
                 ''
             ))
 
+    def mark_device_seen(vidpid_key, name):
+        """Mark a device as seen active for the first time."""
+        if vidpid_key in seen_active:
+            return False  # Already seen
+
+        seen_active.add(vidpid_key)
+
+        # Add to known_devices in config if not already there
+        if vidpid_key not in config.known_devices:
+            vid_str, pid_str = vidpid_key.split(':')
+            config.known_devices[vidpid_key] = KnownDevice(
+                vid=int(vid_str, 16),
+                pid=int(pid_str, 16),
+                name=name,
+                enabled=True
+            )
+            save_config(config)
+            log.info(f"Added new known device: {vidpid_key} ({name})")
+
+        return True  # First time seen
+
+    def move_to_top(item_id):
+        """Move an item to the top of the tree."""
+        tree.move(item_id, '', 0)
+
     def on_raw_input_activity(device_path: str):
         """Called when Raw Input detects activity on a specific device."""
-        # Extract VID and PID from path like \\?\HID#VID_046D&PID_C52B&...
         match = re.search(r'VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})', device_path)
         if match:
             vidpid_key = f"{match.group(1).upper()}:{match.group(2).upper()}"
 
             # If this device isn't in our map, add it dynamically
             if vidpid_key not in vidpid_to_item:
-                vid_display = f"0x{match.group(1).upper()}:0x{match.group(2).upper()}"
-                item_id = tree.insert('', tk.END, values=('', f'Mouse ({vidpid_key})', 'Mouse/Pointer', vid_display))
-                device_activity[item_id] = 0.0
-                vidpid_to_item[vidpid_key] = item_id
+                name = f'Mouse ({vidpid_key})'
+                add_device_to_tree(vidpid_key, name, 'Mouse/Pointer')
                 log.info(f"Discovered new mouse via Raw Input: {vidpid_key}")
 
             if vidpid_key in vidpid_to_item:
                 item_id = vidpid_to_item[vidpid_key]
                 device_activity[item_id] = time.time()
+
+                # First time seeing this device active?
+                name = item_to_name.get(item_id, '')
+                if mark_device_seen(vidpid_key, name):
+                    # Move to top and update checkbox display
+                    move_to_top(item_id)
+                    tree.set(item_id, 'enabled', get_enabled_display(vidpid_key))
 
     # Try to use Windows Raw Input API for per-device detection
     if sys.platform == 'win32':
@@ -183,14 +297,18 @@ def show_devices_dialog():
         now = time.time()
         active_count = 0
 
-        for item_id in device_activity:
+        for item_id in list(device_activity.keys()):
             try:
                 elapsed = now - device_activity.get(item_id, 0)
+                vidpid_key = item_to_vidpid.get(item_id, '')
 
                 if elapsed < 0.3:
                     tree.item(item_id, tags=('active',))
                     tree.set(item_id, 'activity', '● ACTIVE')
                     active_count += 1
+                elif vidpid_key in seen_active:
+                    tree.item(item_id, tags=('known',))
+                    tree.set(item_id, 'activity', '')
                 else:
                     tree.item(item_id, tags=('inactive',))
                     tree.set(item_id, 'activity', '')
@@ -199,7 +317,7 @@ def show_devices_dialog():
 
         # Update debug with activity status
         if raw_input_monitor:
-            debug_var.set(f"Raw Input active, {len(vidpid_to_item)} devices mapped, {active_count} active now")
+            debug_var.set(f"Raw Input active, {len(seen_active)} known devices, {active_count} active now")
 
         root.after(50, update_display)
 
@@ -212,10 +330,7 @@ def show_devices_dialog():
     root.protocol("WM_DELETE_WINDOW", on_close)
 
     # Info label
-    if sys.platform == 'win32':
-        info_text = "Using Windows Raw Input API for per-device activity detection."
-    else:
-        info_text = "Per-device detection only available on Windows."
+    info_text = "Click the Layer checkbox to enable/disable autolayer for each device."
     info_label = ttk.Label(main_frame, text=info_text, font=('Segoe UI', 9), foreground='gray')
     info_label.pack(pady=(10, 0))
 
@@ -287,6 +402,20 @@ class AutoMouse:
             on_mapped_key=self._on_mapped_key,
             on_unmapped_key=self._on_unmapped_key
         )
+
+        # Set up device filter based on known_devices config
+        def device_filter(vidpid: str) -> bool:
+            """Return True if this device should trigger the layer."""
+            # If device is in known_devices, check its enabled state
+            if vidpid in self.config.known_devices:
+                enabled = self.config.known_devices[vidpid].enabled
+                if not enabled:
+                    log.debug(f"Device {vidpid} is disabled, ignoring activity")
+                return enabled
+            # Unknown devices are allowed by default (will be added to known when seen)
+            return True
+
+        self.keyboard.set_device_filter(device_filter)
 
     def _on_mouse_activity(self):
         """Called when mouse/pointing device activity is detected."""
