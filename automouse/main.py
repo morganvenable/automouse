@@ -420,6 +420,7 @@ class AutoMouse:
             print(f"Timeout: {layer.timeout_ms}ms")
             print(f"Mappings: {list(layer.mappings.keys())}")
         print("\nMove your mouse to activate the layer, then press mapped keys.")
+        print("Press Ctrl+Shift+Q to quit.")
         print("Check the console for detailed logs.\n")
 
         # Start system tray if available
@@ -459,7 +460,30 @@ class AutoMouse:
 
 def main():
     """Main entry point."""
+    import signal
+
     app = AutoMouse()
+
+    def signal_handler(signum, frame):
+        log.info(f"Received signal {signum}, shutting down...")
+        app.stop()
+        sys.exit(0)
+
+    # Register signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Also register a global hotkey to quit (Ctrl+Shift+Q)
+    try:
+        import keyboard as kb
+        def quit_hotkey():
+            log.info("Quit hotkey pressed (Ctrl+Shift+Q)")
+            app.stop()
+            sys.exit(0)
+        kb.add_hotkey('ctrl+shift+q', quit_hotkey, suppress=False)
+        log.info("Registered quit hotkey: Ctrl+Shift+Q")
+    except Exception as e:
+        log.warning(f"Could not register quit hotkey: {e}")
 
     try:
         app.start()
