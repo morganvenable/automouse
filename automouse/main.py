@@ -185,6 +185,11 @@ def show_devices_dialog():
 
         root.after(10, poll_hid_devices)  # Poll every 10ms
 
+    # Debug status label
+    debug_var = tk.StringVar(value="Initializing...")
+    debug_label = tk.Label(main_frame, textvariable=debug_var, font=('Consolas', 9), fg='blue')
+    debug_label.pack(pady=(5, 0))
+
     def on_mouse_activity(x, y):
         """Fallback activity detection via pynput."""
         global_activity[0] = time.time()
@@ -196,6 +201,9 @@ def show_devices_dialog():
 
         now = time.time()
         mouse_active = (now - global_activity[0]) < 0.3
+
+        # Debug info
+        debug_var.set(f"mouse_active={mouse_active}, pointers={len(pointing_device_items)}, devices={len(device_activity)}")
 
         for item_id in device_activity:
             try:
