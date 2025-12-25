@@ -114,19 +114,18 @@ devices: {}
 # Layer configuration
 layers:
   mouse_layer:
-    timeout_ms: 900  # Layer deactivates after this many ms of no mouse movement
+    timeout_ms: 500  # Layer deactivates after this many ms of no mouse movement
     exit_on_other_key: true  # Any non-mapped key exits the layer
     mappings:
       # Home row mouse buttons
-      j: mouse_left_click
-      k: mouse_right_click
-      l: mouse_middle_click
+      f: mouse_left_click
+      s: mouse_right_click
+      d: mouse_middle_click
 
       # Scroll keys
-      u: mouse_scroll_up
-      i: mouse_scroll_down
-      h: mouse_scroll_left
-      ";": mouse_scroll_right
+      x: keyboard_control_x
+      c: keyboard_control_c
+      v: keyboard_control_v
 
       # Modifier combinations work normally (shift+j = shift+left_click for drag)
 """

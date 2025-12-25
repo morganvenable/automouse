@@ -1,0 +1,28 @@
+# AutoMouse Configuration
+
+# When true, any mouse/trackball movement activates the mouse layer
+any_pointing_device: true
+
+# When true, remap keys on any connected keyboard
+any_keyboard: true
+
+# Device-specific configuration (optional - use if you want to limit to specific devices)
+devices: {}
+
+# Layer configuration
+layers:
+  mouse_layer:
+    timeout_ms: 500  # Layer deactivates after this many ms of no mouse movement
+    exit_on_other_key: true  # Any non-mapped key exits the layer
+    mappings:
+      # Home row mouse buttons
+      f: mouse_left_click
+      s: mouse_right_click
+      d: mouse_middle_click
+
+      # Scroll keys
+      x: keyboard_control_x
+      c: keyboard_control_c
+      v: keyboard_control_v
+
+      # Modifier combinations work normally (shift+j = shift+left_click for drag)

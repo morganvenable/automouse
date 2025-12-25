@@ -148,3 +148,7 @@ High-latency abstraction layers.
 You are not building a keyboard tool.
 
 You are building the first host-level cooperative HID fabric.
+
+Design notes:
+
+Use F D S as mouse left middle right click respectively by default
