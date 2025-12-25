@@ -202,8 +202,9 @@ def show_devices_dialog():
         now = time.time()
         mouse_active = (now - global_activity[0]) < 0.3
 
-        # Debug info
-        debug_var.set(f"mouse_active={mouse_active}, pointers={len(pointing_device_items)}, devices={len(device_activity)}")
+        # Debug info - show device types
+        types = [tree.item(i, 'values')[2] for i in device_activity]
+        debug_var.set(f"active={mouse_active}, ptrs={len(pointing_device_items)}, types={types}")
 
         for item_id in device_activity:
             try:

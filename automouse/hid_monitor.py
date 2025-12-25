@@ -43,10 +43,18 @@ class HIDDevice:
     @property
     def is_pointing_device(self) -> bool:
         """Check if this is a pointing device (mouse, trackball, etc)."""
-        return (
-            self.usage_page == USAGE_PAGE_GENERIC_DESKTOP and
-            self.usage in (USAGE_MOUSE, USAGE_POINTER)
-        )
+        # Standard HID check
+        if (self.usage_page == USAGE_PAGE_GENERIC_DESKTOP and
+            self.usage in (USAGE_MOUSE, USAGE_POINTER)):
+            return True
+
+        # Fallback: check device name for common mouse/pointer keywords
+        name = (self.product or self.manufacturer or "").lower()
+        mouse_keywords = ['mouse', 'trackball', 'trackpad', 'touchpad', 'pointing']
+        if any(kw in name for kw in mouse_keywords):
+            return True
+
+        return False
 
     def __hash__(self):
         return hash(self.path)
