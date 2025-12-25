@@ -94,6 +94,8 @@ def show_devices_dialog():
 
     # Track which devices we can read from
     readable_devices = {}  # {item_id: hid_handle}
+    # Track which items are pointing devices (for fallback highlighting)
+    pointing_device_items = set()
 
     def try_open_hid_device(path):
         """Try to open a HID device for reading."""
@@ -139,6 +141,11 @@ def show_devices_dialog():
                 item_id = tree.insert('', tk.END, values=('', name, device_type, vid_pid))
                 device_activity[item_id] = 0.0
 
+                # Track pointing devices for fallback highlighting
+                if is_pointer:
+                    pointing_device_items.add(item_id)
+                    log.info(f"Registered pointing device for activity tracking: {name}")
+
                 # Try to open any of the device's interfaces for reading
                 for d in dev_list:
                     if d.is_pointing_device:
@@ -146,7 +153,7 @@ def show_devices_dialog():
                         if handle:
                             readable_devices[item_id] = handle
                             hid_readers.append((handle, item_id))
-                            log.info(f"Opened HID device for activity monitoring: {name}")
+                            log.info(f"Opened HID device for raw activity monitoring: {name}")
                             break
         else:
             tree.insert('', tk.END, values=(
@@ -188,34 +195,25 @@ def show_devices_dialog():
             return
 
         now = time.time()
+        mouse_active = (now - global_activity[0]) < 0.3
 
         for item_id in device_activity:
             try:
-                elapsed = now - device_activity.get(item_id, 0)
+                hid_elapsed = now - device_activity.get(item_id, 0)
 
-                # If we have HID-level activity, use that
-                if item_id in readable_devices and elapsed < 0.3:
+                # If we have HID-level activity for this specific device
+                if item_id in readable_devices and hid_elapsed < 0.3:
                     tree.item(item_id, tags=('active',))
                     tree.set(item_id, 'activity', '● ACTIVE')
-                # Fallback: if we detected global activity but can't read HID,
-                # show it on pointing devices
-                elif item_id not in readable_devices:
-                    values = tree.item(item_id, 'values')
-                    if values and len(values) > 2 and values[2] == 'Mouse/Pointer':
-                        if now - global_activity[0] < 0.3:
-                            tree.item(item_id, tags=('active',))
-                            tree.set(item_id, 'activity', '● ACTIVE')
-                        else:
-                            tree.item(item_id, tags=('inactive',))
-                            tree.set(item_id, 'activity', '')
-                    else:
-                        tree.item(item_id, tags=('inactive',))
-                        tree.set(item_id, 'activity', '')
+                # Fallback: show global mouse activity on pointing devices we can't read directly
+                elif item_id not in readable_devices and item_id in pointing_device_items and mouse_active:
+                    tree.item(item_id, tags=('active',))
+                    tree.set(item_id, 'activity', '● ACTIVE')
                 else:
                     tree.item(item_id, tags=('inactive',))
                     tree.set(item_id, 'activity', '')
             except Exception as e:
-                log.debug(f"Display update error: {e}")
+                log.warning(f"Display update error: {e}")
 
         root.after(50, update_display)
 
