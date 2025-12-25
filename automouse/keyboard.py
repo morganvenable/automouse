@@ -7,6 +7,7 @@ Uses pynput for cross-platform keyboard hooks and event injection.
 import logging
 import queue
 import threading
+import sys
 from typing import Callable, Dict, Optional, Set
 from enum import Enum, auto
 
@@ -46,40 +47,27 @@ BUTTON_MAP = {
     MouseAction.MIDDLE_CLICK: Button.middle,
 }
 
-# Modifier keys that should pass through and combine with mouse actions
-MODIFIER_KEYS = {
-    Key.shift, Key.shift_l, Key.shift_r,
-    Key.ctrl, Key.ctrl_l, Key.ctrl_r,
-    Key.alt, Key.alt_l, Key.alt_r,
-    Key.cmd, Key.cmd_l, Key.cmd_r,  # macOS command key
-}
+# Modifier keys that should pass through
+MODIFIER_NAMES = {'shift', 'shift_l', 'shift_r', 'ctrl', 'ctrl_l', 'ctrl_r',
+                  'alt', 'alt_l', 'alt_r', 'cmd', 'cmd_l', 'cmd_r'}
 
 
 def key_to_string(key) -> Optional[str]:
     """Convert a pynput key to its string representation."""
-    if isinstance(key, KeyCode):
-        if key.char:
-            return key.char.lower()
-        elif key.vk:
-            # Handle special cases like numpad, etc
-            return None
-    elif isinstance(key, Key):
-        return key.name
+    try:
+        if isinstance(key, KeyCode):
+            if key.char:
+                return key.char.lower()
+        elif isinstance(key, Key):
+            return key.name
+    except:
+        pass
     return None
 
 
 class KeyboardController:
     """
     Handles keyboard interception and mouse action injection.
-
-    When the mouse layer is active:
-    - Mapped keys are intercepted and converted to mouse actions
-    - Unmapped keys can optionally exit the layer
-    - Modifier keys pass through to combine with mouse actions
-
-    IMPORTANT: On Windows, keyboard hooks must return very quickly.
-    All slow operations (mouse actions, callbacks) are dispatched to
-    a worker thread via a queue.
     """
 
     def __init__(self):
@@ -90,30 +78,27 @@ class KeyboardController:
 
         self._layer_active = False
         self._exit_on_unmapped = True
-        self._suppressed_keys: Set[str] = set()
+
+        # Track which keys are currently held down (for key repeat handling)
+        self._held_keys: Set[str] = set()
 
         # Callbacks
         self._on_mouse_activity: Optional[Callable[[], None]] = None
         self._on_mapped_key: Optional[Callable[[], None]] = None
         self._on_unmapped_key: Optional[Callable[[], None]] = None
 
-        # Action queue for async processing (keyboard hooks must return fast!)
+        # Action queue for async processing
         self._action_queue: queue.Queue = queue.Queue()
         self._worker_thread: Optional[threading.Thread] = None
         self._running = False
 
     def set_mappings(self, mappings: Dict[str, str]):
-        """
-        Set key mappings from config.
-        mappings: dict of key_string -> action_string
-        """
         self._mappings = {}
         for key_str, action_str in mappings.items():
             action = ACTION_MAP.get(action_str.lower())
             if action:
                 self._mappings[key_str.lower()] = action
-                log.debug(f"Mapped key '{key_str}' -> {action.name}")
-        log.info(f"Loaded {len(self._mappings)} key mappings")
+        log.info(f"Loaded {len(self._mappings)} key mappings: {list(self._mappings.keys())}")
 
     def set_callbacks(
         self,
@@ -121,194 +106,186 @@ class KeyboardController:
         on_mapped_key: Optional[Callable[[], None]] = None,
         on_unmapped_key: Optional[Callable[[], None]] = None
     ):
-        """Set event callbacks."""
         self._on_mouse_activity = on_mouse_activity
         self._on_mapped_key = on_mapped_key
         self._on_unmapped_key = on_unmapped_key
 
     def set_layer_active(self, active: bool):
-        """Set whether the mouse layer is currently active."""
         if self._layer_active != active:
             self._layer_active = active
             log.info(f"Layer active: {active}")
             if not active:
-                # Release any suppressed keys
-                self._suppressed_keys.clear()
+                self._held_keys.clear()
 
     def set_exit_on_unmapped(self, exit_on_unmapped: bool):
-        """Set whether unmapped keys exit the layer."""
         self._exit_on_unmapped = exit_on_unmapped
-
-    def _is_modifier(self, key) -> bool:
-        """Check if a key is a modifier."""
-        return key in MODIFIER_KEYS
 
     def _on_key_press(self, key):
         """
-        Handle key press events.
-
-        CRITICAL: This runs in the keyboard hook thread on Windows.
-        Must return IMMEDIATELY - no blocking operations allowed.
+        Handle key press - MUST BE ULTRA FAST on Windows.
+        No exceptions can escape. Minimal work only.
         """
+        # Wrap everything in try/except - any exception kills the hook on Windows
         try:
             key_str = key_to_string(key)
-            log.debug(f"Key press: {key} -> '{key_str}' (layer_active={self._layer_active})")
 
-            # Always pass through if layer not active
+            # Layer not active - pass through immediately
             if not self._layer_active:
-                return True
+                return None  # None = pass through
 
-            # Modifiers always pass through
-            if self._is_modifier(key):
-                log.debug(f"Modifier key {key}, passing through")
-                return True
+            # No valid key string - pass through
+            if not key_str:
+                return None
 
-            # Check if it's a mapped key
-            if key_str and key_str in self._mappings:
+            # Modifier - pass through
+            if key_str in MODIFIER_NAMES:
+                return None
+
+            # Key repeat - already held, suppress without new action
+            if key_str in self._held_keys:
+                return False  # Suppress repeat
+
+            # Mapped key - suppress and trigger action
+            if key_str in self._mappings:
+                self._held_keys.add(key_str)
                 action = self._mappings[key_str]
-                self._suppressed_keys.add(key_str)
-                log.info(f"Mapped key '{key_str}' -> {action.name}, suppressing")
+                # Queue action - queue.put() is thread-safe and fast
+                self._action_queue.put_nowait(('press', key_str, action))
+                return False  # Suppress
 
-                # Queue the mouse action (non-blocking!)
-                self._action_queue.put(('mouse_press', action))
+            # Unmapped key - pass through, but notify
+            if self._exit_on_unmapped:
+                self._action_queue.put_nowait(('unmapped',))
+            return None  # Pass through
 
-                # Queue the callback (non-blocking!)
-                if self._on_mapped_key:
-                    self._action_queue.put(('callback', self._on_mapped_key))
-
-                return False  # Suppress the key
-
-            else:
-                # Unmapped key
-                log.debug(f"Unmapped key '{key_str}', passing through")
-                if self._exit_on_unmapped and self._on_unmapped_key:
-                    self._action_queue.put(('callback', self._on_unmapped_key))
-                return True  # Pass through
-
-        except Exception as e:
-            log.error(f"Error in key press handler: {e}")
-            return True  # Pass through on error
+        except:
+            # Never let exceptions escape
+            return None
 
     def _on_key_release(self, key):
-        """Handle key release events."""
+        """Handle key release - MUST BE ULTRA FAST."""
         try:
             key_str = key_to_string(key)
-            log.debug(f"Key release: {key} -> '{key_str}'")
 
-            if key_str and key_str in self._suppressed_keys:
-                self._suppressed_keys.discard(key_str)
-                log.debug(f"Releasing suppressed key '{key_str}'")
+            if not key_str:
+                return None
 
-                # Queue mouse button release
+            # Was this key being held by us?
+            if key_str in self._held_keys:
+                self._held_keys.discard(key_str)
                 action = self._mappings.get(key_str)
                 if action:
-                    self._action_queue.put(('mouse_release', action))
+                    self._action_queue.put_nowait(('release', key_str, action))
+                return False  # Suppress release
 
-                return False  # Suppress the release too
+            return None  # Pass through
 
-            return True  # Pass through
-
-        except Exception as e:
-            log.error(f"Error in key release handler: {e}")
-            return True
+        except:
+            return None
 
     def _worker_loop(self):
-        """Worker thread that processes mouse actions and callbacks."""
-        log.info("Action worker thread started")
+        """Worker thread - processes actions from queue."""
+        log.info("Worker thread started")
+
         while self._running:
             try:
-                # Wait for action with timeout (allows clean shutdown)
-                try:
-                    action = self._action_queue.get(timeout=0.1)
-                except queue.Empty:
-                    continue
+                item = self._action_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            except:
+                continue
 
-                action_type = action[0]
+            try:
+                cmd = item[0]
 
-                if action_type == 'mouse_press':
-                    self._do_mouse_action(action[1], pressed=True)
-                elif action_type == 'mouse_release':
-                    self._do_mouse_action(action[1], pressed=False)
-                elif action_type == 'callback':
-                    try:
-                        action[1]()
-                    except Exception as e:
-                        log.error(f"Error in callback: {e}")
+                if cmd == 'press':
+                    key_str, action = item[1], item[2]
+                    log.info(f"Key '{key_str}' -> {action.name}")
+                    self._do_mouse_action(action, pressed=True)
+                    if self._on_mapped_key:
+                        self._on_mapped_key()
 
-                self._action_queue.task_done()
+                elif cmd == 'release':
+                    key_str, action = item[1], item[2]
+                    log.debug(f"Key '{key_str}' released")
+                    self._do_mouse_action(action, pressed=False)
+
+                elif cmd == 'unmapped':
+                    if self._on_unmapped_key:
+                        self._on_unmapped_key()
+
+                elif cmd == 'mouse_activity':
+                    if self._on_mouse_activity:
+                        self._on_mouse_activity()
 
             except Exception as e:
-                log.error(f"Error in worker loop: {e}")
+                log.error(f"Worker error: {e}")
 
-        log.info("Action worker thread stopped")
+        log.info("Worker thread stopped")
 
     def _do_mouse_action(self, action: MouseAction, pressed: bool):
-        """Perform a mouse action."""
+        """Perform mouse action."""
         try:
             if action in BUTTON_MAP:
                 button = BUTTON_MAP[action]
                 if pressed:
-                    log.info(f"Mouse press: {button}")
+                    log.info(f"Mouse {button} press")
                     self._mouse_controller.press(button)
                 else:
-                    log.info(f"Mouse release: {button}")
+                    log.debug(f"Mouse {button} release")
                     self._mouse_controller.release(button)
-
-            elif pressed:  # Scroll actions only on press, not release
+            elif pressed:
                 if action == MouseAction.SCROLL_UP:
-                    log.info("Scroll up")
                     self._mouse_controller.scroll(0, 3)
                 elif action == MouseAction.SCROLL_DOWN:
-                    log.info("Scroll down")
                     self._mouse_controller.scroll(0, -3)
                 elif action == MouseAction.SCROLL_LEFT:
-                    log.info("Scroll left")
                     self._mouse_controller.scroll(-3, 0)
                 elif action == MouseAction.SCROLL_RIGHT:
-                    log.info("Scroll right")
                     self._mouse_controller.scroll(3, 0)
         except Exception as e:
-            log.error(f"Error performing mouse action {action}: {e}")
+            log.error(f"Mouse action error: {e}")
 
     def _on_mouse_move(self, x, y):
-        """Handle mouse movement."""
-        # Queue the callback (don't block the mouse listener either)
-        if self._on_mouse_activity:
-            self._action_queue.put(('callback', self._on_mouse_activity))
+        """Mouse movement detected."""
+        try:
+            self._action_queue.put_nowait(('mouse_activity',))
+        except:
+            pass
 
     def _on_mouse_click(self, x, y, button, pressed):
-        """Handle mouse clicks."""
-        log.debug(f"Mouse click: {button} pressed={pressed} at ({x}, {y})")
-        if self._on_mouse_activity:
-            self._action_queue.put(('callback', self._on_mouse_activity))
+        """Mouse click detected."""
+        try:
+            self._action_queue.put_nowait(('mouse_activity',))
+        except:
+            pass
 
     def _on_mouse_scroll(self, x, y, dx, dy):
-        """Handle mouse scroll."""
-        log.debug(f"Mouse scroll: dx={dx} dy={dy} at ({x}, {y})")
-        if self._on_mouse_activity:
-            self._action_queue.put(('callback', self._on_mouse_activity))
+        """Mouse scroll detected."""
+        try:
+            self._action_queue.put_nowait(('mouse_activity',))
+        except:
+            pass
 
     def start(self):
-        """Start keyboard and mouse listeners."""
+        """Start listeners."""
         self._running = True
 
-        # Start worker thread first
+        # Start worker first
         self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker_thread.start()
 
-        log.info("Starting keyboard listener with suppress=True")
-
-        # Keyboard listener - suppress=True is required on Windows to actually
-        # be able to block keys. The callback return value controls per-key suppression.
+        # Keyboard listener
+        # Use suppress=True to intercept keys, return False to suppress, None to pass
         self._keyboard_listener = keyboard.Listener(
             on_press=self._on_key_press,
             on_release=self._on_key_release,
             suppress=True
         )
         self._keyboard_listener.start()
-        log.info("Keyboard listener started")
+        log.info("Keyboard listener started (suppress=True)")
 
-        # Mouse listener for activity detection
+        # Mouse listener
         self._mouse_listener = mouse.Listener(
             on_move=self._on_mouse_move,
             on_click=self._on_mouse_click,
@@ -319,7 +296,7 @@ class KeyboardController:
 
     def stop(self):
         """Stop listeners."""
-        log.info("Stopping listeners")
+        log.info("Stopping...")
         self._running = False
 
         if self._keyboard_listener:
@@ -334,4 +311,4 @@ class KeyboardController:
             self._worker_thread.join(timeout=1.0)
             self._worker_thread = None
 
-        log.info("Listeners stopped")
+        log.info("Stopped")
