@@ -33,7 +33,11 @@ def check_requirements():
     # Check Nuitka
     try:
         import nuitka
-        print(f"✓ Nuitka {nuitka.__version__} found")
+        # Get version via command line since nuitka doesn't expose __version__
+        result = subprocess.run([sys.executable, "-m", "nuitka", "--version"],
+                                capture_output=True, text=True)
+        version = result.stdout.strip().split('\n')[0] if result.returncode == 0 else "unknown"
+        print(f"✓ Nuitka found ({version})")
     except ImportError:
         print("✗ Nuitka not found. Install with: pip install nuitka ordered-set zstandard")
         return False
