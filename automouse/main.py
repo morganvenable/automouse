@@ -408,20 +408,6 @@ class AutoMouse:
             on_unmapped_key=self._on_unmapped_key
         )
 
-        # Set up device filter based on known_devices config
-        def device_filter(vidpid: str) -> bool:
-            """Return True if this device should trigger the layer."""
-            # If device is in known_devices, check its enabled state
-            if vidpid in self.config.known_devices:
-                enabled = self.config.known_devices[vidpid].enabled
-                if not enabled:
-                    log.debug(f"Device {vidpid} is disabled, ignoring activity")
-                return enabled
-            # Unknown devices are allowed by default (will be added to known when seen)
-            return True
-
-        self.keyboard.set_device_filter(device_filter)
-
     def _on_mouse_activity(self):
         """Called when mouse/pointing device activity is detected."""
         if self.state_machine:
