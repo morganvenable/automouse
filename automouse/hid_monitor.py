@@ -5,16 +5,21 @@ Uses hidapi for raw HID access to detect mouse/trackball movement
 without interfering with normal operation.
 """
 
+import logging
 import threading
 import time
 from typing import Callable, List, Optional, Set, Tuple
 from dataclasses import dataclass
 
+log = logging.getLogger(__name__)
+
 try:
     import hid
     HID_AVAILABLE = True
-except ImportError:
+    log.debug("hidapi imported successfully")
+except ImportError as e:
     HID_AVAILABLE = False
+    log.warning(f"hidapi not available: {e}")
 
 
 # Standard HID usage pages and usages for pointing devices
@@ -84,11 +89,16 @@ def enumerate_pointing_devices() -> List[HIDDevice]:
 def enumerate_all_devices() -> List[HIDDevice]:
     """Enumerate all HID devices."""
     if not HID_AVAILABLE:
+        log.warning("Cannot enumerate: hidapi not available")
         return []
 
     devices = []
     try:
-        for dev_info in hid.enumerate():
+        log.debug("Calling hid.enumerate()...")
+        raw_devices = hid.enumerate()
+        log.debug(f"Found {len(raw_devices)} raw HID devices")
+
+        for dev_info in raw_devices:
             devices.append(HIDDevice(
                 path=dev_info.get('path', b''),
                 vid=dev_info.get('vendor_id', 0),
@@ -99,8 +109,8 @@ def enumerate_all_devices() -> List[HIDDevice]:
                 usage_page=dev_info.get('usage_page', 0),
                 usage=dev_info.get('usage', 0)
             ))
-    except Exception:
-        pass
+    except Exception as e:
+        log.error(f"Error enumerating HID devices: {e}")
 
     return devices
 

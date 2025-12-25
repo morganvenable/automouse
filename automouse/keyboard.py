@@ -11,7 +11,7 @@ import threading
 from typing import Callable, Dict, Optional, Set
 from enum import Enum, auto
 
-import keyboard as kb  # The keyboard library - reliable Windows hooks
+import keyboard as kb
 from pynput import mouse
 from pynput.mouse import Button
 
@@ -47,18 +47,10 @@ BUTTON_MAP = {
     MouseAction.MIDDLE_CLICK: Button.middle,
 }
 
-# Modifier key names to pass through
-MODIFIER_NAMES = {'shift', 'ctrl', 'alt', 'left shift', 'right shift',
-                  'left ctrl', 'right ctrl', 'left alt', 'right alt',
-                  'left windows', 'right windows'}
-
 
 class KeyboardController:
     """
     Handles keyboard interception and mouse action injection.
-
-    Uses the 'keyboard' library for hooks (better Windows support)
-    and pynput for mouse actions.
     """
 
     def __init__(self):
@@ -69,6 +61,7 @@ class KeyboardController:
         self._layer_active = False
         self._exit_on_unmapped = True
         self._held_keys: Set[str] = set()
+        self._registered_hotkeys: list = []
 
         # Callbacks
         self._on_mouse_activity: Optional[Callable[[], None]] = None
@@ -80,15 +73,11 @@ class KeyboardController:
         self._worker_thread: Optional[threading.Thread] = None
         self._running = False
 
-        # Keyboard hook handle
-        self._hook_installed = False
-
     def set_mappings(self, mappings: Dict[str, str]):
         self._mappings = {}
         for key_str, action_str in mappings.items():
             action = ACTION_MAP.get(action_str.lower())
             if action:
-                # Normalize key name for 'keyboard' library
                 self._mappings[key_str.lower()] = action
         log.info(f"Loaded {len(self._mappings)} key mappings: {list(self._mappings.keys())}")
 
@@ -106,64 +95,71 @@ class KeyboardController:
         if self._layer_active != active:
             self._layer_active = active
             log.info(f"Layer active: {active}")
-            if not active:
+
+            if active:
+                self._register_hotkeys()
+            else:
+                self._unregister_hotkeys()
                 self._held_keys.clear()
 
     def set_exit_on_unmapped(self, exit_on_unmapped: bool):
         self._exit_on_unmapped = exit_on_unmapped
 
-    def _on_key_event(self, event):
-        """
-        Handle keyboard events from the 'keyboard' library.
+    def _register_hotkeys(self):
+        """Register hotkeys for mapped keys when layer is active."""
+        self._unregister_hotkeys()  # Clear any existing
 
-        This runs in the hook thread - must be fast!
-        Return True to suppress the key, False to pass through.
-        """
+        for key_name, action in self._mappings.items():
+            try:
+                # Register press handler (suppress=True blocks the key)
+                hook_id = kb.on_press_key(
+                    key_name,
+                    lambda e, k=key_name, a=action: self._on_mapped_press(k, a),
+                    suppress=True
+                )
+                self._registered_hotkeys.append(hook_id)
+
+                # Register release handler
+                hook_id = kb.on_release_key(
+                    key_name,
+                    lambda e, k=key_name, a=action: self._on_mapped_release(k, a),
+                    suppress=True
+                )
+                self._registered_hotkeys.append(hook_id)
+
+                log.debug(f"Registered hotkey: {key_name}")
+            except Exception as e:
+                log.error(f"Failed to register hotkey {key_name}: {e}")
+
+    def _unregister_hotkeys(self):
+        """Unregister all hotkeys."""
+        for hook_id in self._registered_hotkeys:
+            try:
+                kb.unhook(hook_id)
+            except:
+                pass
+        self._registered_hotkeys.clear()
+
+    def _on_mapped_press(self, key_name: str, action: MouseAction):
+        """Handle mapped key press."""
         try:
-            key_name = event.name.lower() if event.name else None
-            is_down = event.event_type == 'down'
+            # Ignore key repeats
+            if key_name in self._held_keys:
+                return
 
-            # Layer not active - pass through
-            if not self._layer_active:
-                return False
+            self._held_keys.add(key_name)
+            self._action_queue.put_nowait(('press', key_name, action))
+        except:
+            pass
 
-            if not key_name:
-                return False
-
-            # Modifiers pass through
-            if key_name in MODIFIER_NAMES:
-                return False
-
-            if is_down:
-                # Key repeat - suppress but don't re-trigger action
-                if key_name in self._held_keys:
-                    return True  # Suppress repeat
-
-                # Mapped key?
-                if key_name in self._mappings:
-                    self._held_keys.add(key_name)
-                    action = self._mappings[key_name]
-                    self._action_queue.put_nowait(('press', key_name, action))
-                    return True  # Suppress
-
-                # Unmapped key - pass through but maybe exit layer
-                if self._exit_on_unmapped:
-                    self._action_queue.put_nowait(('unmapped',))
-                return False
-
-            else:  # key up
-                if key_name in self._held_keys:
-                    self._held_keys.discard(key_name)
-                    action = self._mappings.get(key_name)
-                    if action:
-                        self._action_queue.put_nowait(('release', key_name, action))
-                    return True  # Suppress release too
-
-                return False
-
-        except Exception as e:
-            log.error(f"Key event error: {e}")
-            return False
+    def _on_mapped_release(self, key_name: str, action: MouseAction):
+        """Handle mapped key release."""
+        try:
+            if key_name in self._held_keys:
+                self._held_keys.discard(key_name)
+                self._action_queue.put_nowait(('release', key_name, action))
+        except:
+            pass
 
     def _worker_loop(self):
         """Worker thread for slow operations."""
@@ -189,10 +185,6 @@ class KeyboardController:
                     key_str, action = item[1], item[2]
                     log.debug(f"Key '{key_str}' released")
                     self._do_mouse_action(action, pressed=False)
-
-                elif cmd == 'unmapped':
-                    if self._on_unmapped_key:
-                        self._on_unmapped_key()
 
                 elif cmd == 'mouse_activity':
                     if self._on_mouse_activity:
@@ -252,13 +244,11 @@ class KeyboardController:
         self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker_thread.start()
 
-        # Install keyboard hook using 'keyboard' library
-        # suppress=True means the callback can return True to block keys
-        kb.hook(self._on_key_event, suppress=True)
-        self._hook_installed = True
-        log.info("Keyboard hook installed")
+        # Note: We don't install a global keyboard hook here.
+        # Instead, hotkeys are registered dynamically when layer becomes active.
+        log.info("Keyboard controller started (hotkeys registered on layer activation)")
 
-        # Mouse listener (pynput - just for monitoring, not control)
+        # Mouse listener (pynput - just for monitoring)
         self._mouse_listener = mouse.Listener(
             on_move=self._on_mouse_move,
             on_click=self._on_mouse_click,
@@ -272,9 +262,7 @@ class KeyboardController:
         log.info("Stopping...")
         self._running = False
 
-        if self._hook_installed:
-            kb.unhook_all()
-            self._hook_installed = False
+        self._unregister_hotkeys()
 
         if self._mouse_listener:
             self._mouse_listener.stop()

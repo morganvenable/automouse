@@ -172,33 +172,35 @@ class AutoMouse:
             log.info("Configuration reloaded")
 
         def show_devices(icon, item):
-            log.info("Enumerating HID devices...")
-            print("\n" + "="*60)
-            print("HID DEVICE ENUMERATION")
-            print("="*60)
+            log.info("=" * 60)
+            log.info("HID DEVICE ENUMERATION")
+            log.info("=" * 60)
 
-            if not HID_AVAILABLE:
-                print("WARNING: hidapi not available. Install with: pip install hidapi")
-                print("On Windows, you may also need to install hidapi DLL.")
-            else:
-                # Show all HID devices
-                all_devices = enumerate_all_devices()
-                if all_devices:
-                    print(f"\nFound {len(all_devices)} HID devices:")
-                    for d in all_devices:
-                        is_mouse = d.is_pointing_device
-                        marker = " [POINTING DEVICE]" if is_mouse else ""
-                        name = d.product or d.manufacturer or "Unknown"
-                        print(f"  {name}{marker}")
-                        print(f"    VID:0x{d.vid:04X} PID:0x{d.pid:04X}")
-                        print(f"    Usage Page: 0x{d.usage_page:04X} Usage: 0x{d.usage:02X}")
+            try:
+                if not HID_AVAILABLE:
+                    log.warning("hidapi not available. Install with: pip install hidapi")
+                    log.warning("On Windows, you may also need to install hidapi DLL.")
                 else:
-                    print("\nNo HID devices found.")
-                    print("This may be normal on Windows - mice are often exclusively owned by the OS.")
+                    # Show all HID devices
+                    all_devices = enumerate_all_devices()
+                    if all_devices:
+                        log.info(f"Found {len(all_devices)} HID devices:")
+                        for d in all_devices:
+                            is_mouse = d.is_pointing_device
+                            marker = " [POINTING DEVICE]" if is_mouse else ""
+                            name = d.product or d.manufacturer or "Unknown"
+                            log.info(f"  {name}{marker}")
+                            log.info(f"    VID:0x{d.vid:04X} PID:0x{d.pid:04X}")
+                            log.info(f"    Usage Page: 0x{d.usage_page:04X} Usage: 0x{d.usage:02X}")
+                    else:
+                        log.info("No HID devices found.")
+                        log.info("This may be normal on Windows - mice are often exclusively owned by the OS.")
 
-            print("\nNote: AutoMouse uses pynput for mouse activity detection,")
-            print("which works with any mouse without needing raw HID access.")
-            print("="*60 + "\n")
+                log.info("Note: AutoMouse uses pynput for mouse activity detection,")
+                log.info("which works with any mouse without needing raw HID access.")
+                log.info("=" * 60)
+            except Exception as e:
+                log.error(f"Error in show_devices: {e}")
 
         def quit_app(icon, item):
             log.info("Quit requested from tray menu")
