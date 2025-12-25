@@ -322,9 +322,14 @@ def show_devices_dialog():
         root.after(50, update_display)
 
     def on_close():
+        nonlocal debug_var
         dialog_open[0] = False
         if raw_input_monitor:
             raw_input_monitor.stop()
+        # Clean up Tkinter variables before destroying to avoid thread issues
+        debug_var.set("")
+        debug_var = None
+        root.quit()
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)
