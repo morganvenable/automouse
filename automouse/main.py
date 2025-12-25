@@ -150,6 +150,15 @@ def show_devices_dialog():
         match = re.search(r'VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})', device_path)
         if match:
             vidpid_key = f"{match.group(1).upper()}:{match.group(2).upper()}"
+
+            # If this device isn't in our map, add it dynamically
+            if vidpid_key not in vidpid_to_item:
+                vid_display = f"0x{match.group(1).upper()}:0x{match.group(2).upper()}"
+                item_id = tree.insert('', tk.END, values=('', f'Mouse ({vidpid_key})', 'Mouse/Pointer', vid_display))
+                device_activity[item_id] = 0.0
+                vidpid_to_item[vidpid_key] = item_id
+                log.info(f"Discovered new mouse via Raw Input: {vidpid_key}")
+
             if vidpid_key in vidpid_to_item:
                 item_id = vidpid_to_item[vidpid_key]
                 device_activity[item_id] = time.time()
