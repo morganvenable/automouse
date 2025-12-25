@@ -34,87 +34,85 @@ log = logging.getLogger(__name__)
 
 
 def show_devices_dialog():
-    """Show a GUI dialog with connected HID devices and live activity monitor."""
+    """Show a GUI dialog with connected HID devices and live per-device activity monitor."""
     from pynput import mouse
     import time
 
-    # Track activity
-    last_activity = [0.0]  # Use list for mutability in nested function
+    # Track activity per device - key is tree item id, value is last activity time
+    device_activity = {}  # {item_id: last_activity_time}
+    global_activity = [0.0]  # Fallback for non-HID-readable devices
     dialog_open = [True]
+    hid_readers = []  # List of (device_handle, item_id) for cleanup
 
     # Create window
     root = tk.Tk()
     root.title("AutoMouse - HID Devices")
-    root.geometry("600x450")
+    root.geometry("650x500")
     root.resizable(True, True)
+
+    # Configure tag styles for highlighting active devices
+    style = ttk.Style()
+    style.configure("Treeview", rowheight=25)
 
     # Create main frame with padding
     main_frame = ttk.Frame(root, padding="10")
     main_frame.pack(fill=tk.BOTH, expand=True)
 
-    # Live activity indicator frame
-    activity_frame = ttk.LabelFrame(main_frame, text="Live Mouse Activity", padding="10")
-    activity_frame.pack(fill=tk.X, pady=(0, 10))
-
-    activity_indicator = tk.Label(
-        activity_frame,
-        text="Move mouse to test...",
-        font=('Segoe UI', 11),
-        fg='gray'
-    )
-    activity_indicator.pack()
-
-    def on_mouse_activity(x, y):
-        last_activity[0] = time.time()
-
-    def update_indicator():
-        if not dialog_open[0]:
-            return
-        elapsed = time.time() - last_activity[0]
-        if elapsed < 0.3:
-            activity_indicator.config(text="MOUSE ACTIVE", fg='green', font=('Segoe UI', 11, 'bold'))
-        else:
-            activity_indicator.config(text="Waiting for mouse...", fg='gray', font=('Segoe UI', 11))
-        root.after(100, update_indicator)
-
-    # Start mouse listener for this dialog
-    mouse_listener = mouse.Listener(on_move=on_mouse_activity)
-    mouse_listener.start()
-
-    def on_close():
-        dialog_open[0] = False
-        mouse_listener.stop()
-        root.destroy()
-
-    root.protocol("WM_DELETE_WINDOW", on_close)
-
     # Title label
     title = ttk.Label(main_frame, text="Connected HID Devices", font=('Segoe UI', 12, 'bold'))
     title.pack(pady=(0, 10))
 
-    # Create treeview for device list
-    columns = ('name', 'type', 'vid_pid')
-    tree = ttk.Treeview(main_frame, columns=columns, show='headings', height=10)
+    # Create frame for treeview
+    tree_frame = ttk.Frame(main_frame)
+    tree_frame.pack(fill=tk.BOTH, expand=True)
 
+    # Create treeview for device list with activity column
+    columns = ('activity', 'name', 'type', 'vid_pid')
+    tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=12)
+
+    tree.heading('activity', text='Activity')
     tree.heading('name', text='Device Name')
     tree.heading('type', text='Type')
     tree.heading('vid_pid', text='VID:PID')
 
-    tree.column('name', width=300)
+    tree.column('activity', width=80, anchor='center')
+    tree.column('name', width=280)
     tree.column('type', width=120)
     tree.column('vid_pid', width=120)
 
+    # Configure tags for active/inactive states
+    tree.tag_configure('active', background='#90EE90')  # Light green
+    tree.tag_configure('inactive', background='')
+
     # Add scrollbar
-    scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL, command=tree.yview)
+    scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
     tree.configure(yscrollcommand=scrollbar.set)
 
     # Pack tree and scrollbar
     tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
+    # Track which devices we can read from
+    readable_devices = {}  # {item_id: hid_handle}
+
+    def try_open_hid_device(path):
+        """Try to open a HID device for reading."""
+        if not HID_AVAILABLE:
+            return None
+        try:
+            import hid
+            device = hid.device()
+            device.open_path(path)
+            device.set_nonblocking(True)
+            return device
+        except Exception as e:
+            log.debug(f"Cannot open HID device for reading: {e}")
+            return None
+
     # Populate with ALL HID devices, marking pointing devices
     if not HID_AVAILABLE:
         tree.insert('', tk.END, values=(
+            '',
             'hidapi not available',
             '',
             'pip install hidapi'
@@ -123,26 +121,126 @@ def show_devices_dialog():
         devices = enumerate_all_devices()
         if devices:
             # Deduplicate by VID:PID (devices can have multiple interfaces)
-            seen = set()
+            # But keep track of all paths for a device
+            device_map = {}  # (name, vid_pid) -> [device_objects]
             for d in devices:
                 vid_pid = f"0x{d.vid:04X}:0x{d.pid:04X}"
                 name = d.product or d.manufacturer or "Unknown Device"
                 key = (name, vid_pid)
-                if key in seen:
-                    continue
-                seen.add(key)
+                if key not in device_map:
+                    device_map[key] = []
+                device_map[key].append(d)
 
-                device_type = "Mouse/Pointer" if d.is_pointing_device else "Other HID"
-                tree.insert('', tk.END, values=(name, device_type, vid_pid))
+            for (name, vid_pid), dev_list in device_map.items():
+                # Check if any is a pointing device
+                is_pointer = any(d.is_pointing_device for d in dev_list)
+                device_type = "Mouse/Pointer" if is_pointer else "Other HID"
+
+                item_id = tree.insert('', tk.END, values=('', name, device_type, vid_pid))
+                device_activity[item_id] = 0.0
+
+                # Try to open any of the device's interfaces for reading
+                for d in dev_list:
+                    if d.is_pointing_device:
+                        handle = try_open_hid_device(d.path)
+                        if handle:
+                            readable_devices[item_id] = handle
+                            hid_readers.append((handle, item_id))
+                            log.info(f"Opened HID device for activity monitoring: {name}")
+                            break
         else:
             tree.insert('', tk.END, values=(
+                '',
                 'No HID devices found',
                 '',
                 ''
             ))
 
+    def poll_hid_devices():
+        """Poll readable HID devices for activity."""
+        if not dialog_open[0]:
+            return
+
+        for item_id, handle in list(readable_devices.items()):
+            try:
+                # Try to read data (non-blocking)
+                data = handle.read(64)
+                if data:
+                    device_activity[item_id] = time.time()
+            except Exception as e:
+                log.debug(f"HID read error: {e}")
+                # Device may have been disconnected
+                try:
+                    handle.close()
+                except:
+                    pass
+                readable_devices.pop(item_id, None)
+
+        root.after(10, poll_hid_devices)  # Poll every 10ms
+
+    def on_mouse_activity(x, y):
+        """Fallback activity detection via pynput."""
+        global_activity[0] = time.time()
+
+    def update_display():
+        """Update the activity display for all devices."""
+        if not dialog_open[0]:
+            return
+
+        now = time.time()
+
+        for item_id in device_activity:
+            try:
+                elapsed = now - device_activity.get(item_id, 0)
+
+                # If we have HID-level activity, use that
+                if item_id in readable_devices and elapsed < 0.3:
+                    tree.item(item_id, tags=('active',))
+                    tree.set(item_id, 'activity', '● ACTIVE')
+                # Fallback: if we detected global activity but can't read HID,
+                # show it on pointing devices
+                elif item_id not in readable_devices:
+                    values = tree.item(item_id, 'values')
+                    if values and len(values) > 2 and values[2] == 'Mouse/Pointer':
+                        if now - global_activity[0] < 0.3:
+                            tree.item(item_id, tags=('active',))
+                            tree.set(item_id, 'activity', '● ACTIVE')
+                        else:
+                            tree.item(item_id, tags=('inactive',))
+                            tree.set(item_id, 'activity', '')
+                    else:
+                        tree.item(item_id, tags=('inactive',))
+                        tree.set(item_id, 'activity', '')
+                else:
+                    tree.item(item_id, tags=('inactive',))
+                    tree.set(item_id, 'activity', '')
+            except Exception as e:
+                log.debug(f"Display update error: {e}")
+
+        root.after(50, update_display)
+
+    # Start mouse listener for fallback activity detection
+    mouse_listener = mouse.Listener(on_move=on_mouse_activity)
+    mouse_listener.start()
+
+    def on_close():
+        dialog_open[0] = False
+        mouse_listener.stop()
+        # Close all HID handles
+        for handle, _ in hid_readers:
+            try:
+                handle.close()
+            except:
+                pass
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
+
     # Info label
-    info_text = "Note: Your mouse may not appear in the list (Windows limitation), but detection works."
+    if readable_devices:
+        info_text = "Per-device activity monitoring active. Move your mouse to see which device is active."
+    else:
+        info_text = "Note: Raw HID access not available. Showing global mouse activity on pointing devices."
     info_label = ttk.Label(main_frame, text=info_text, font=('Segoe UI', 9), foreground='gray')
     info_label.pack(pady=(10, 0))
 
@@ -158,8 +256,9 @@ def show_devices_dialog():
     y = (root.winfo_screenheight() // 2) - (height // 2)
     root.geometry(f'{width}x{height}+{x}+{y}')
 
-    # Start the activity indicator update loop
-    update_indicator()
+    # Start the polling and display update loops
+    poll_hid_devices()
+    update_display()
 
     # Run dialog
     root.mainloop()
