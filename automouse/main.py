@@ -22,7 +22,7 @@ except ImportError:
 from .config import load_config, get_config_path, Config
 from .state import LayerStateMachine, LayerState, StateChange
 from .keyboard import KeyboardController
-from .hid_monitor import enumerate_pointing_devices, HID_AVAILABLE
+from .hid_monitor import enumerate_pointing_devices, enumerate_all_devices, HID_AVAILABLE
 
 # Configure logging
 logging.basicConfig(
@@ -34,11 +34,11 @@ log = logging.getLogger(__name__)
 
 
 def show_devices_dialog():
-    """Show a GUI dialog with connected pointing devices."""
+    """Show a GUI dialog with connected HID devices."""
     # Create window
     root = tk.Tk()
-    root.title("AutoMouse - Pointing Devices")
-    root.geometry("500x300")
+    root.title("AutoMouse - HID Devices")
+    root.geometry("600x400")
     root.resizable(True, True)
 
     # Create main frame with padding
@@ -46,17 +46,19 @@ def show_devices_dialog():
     main_frame.pack(fill=tk.BOTH, expand=True)
 
     # Title label
-    title = ttk.Label(main_frame, text="Connected Pointing Devices", font=('Segoe UI', 12, 'bold'))
+    title = ttk.Label(main_frame, text="Connected HID Devices", font=('Segoe UI', 12, 'bold'))
     title.pack(pady=(0, 10))
 
     # Create treeview for device list
-    columns = ('name', 'vid_pid')
-    tree = ttk.Treeview(main_frame, columns=columns, show='headings', height=8)
+    columns = ('name', 'type', 'vid_pid')
+    tree = ttk.Treeview(main_frame, columns=columns, show='headings', height=12)
 
     tree.heading('name', text='Device Name')
+    tree.heading('type', text='Type')
     tree.heading('vid_pid', text='VID:PID')
 
-    tree.column('name', width=350)
+    tree.column('name', width=300)
+    tree.column('type', width=120)
     tree.column('vid_pid', width=120)
 
     # Add scrollbar
@@ -67,22 +69,32 @@ def show_devices_dialog():
     tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-    # Populate with ONLY pointing devices (mice, trackballs)
+    # Populate with ALL HID devices, marking pointing devices
     if not HID_AVAILABLE:
         tree.insert('', tk.END, values=(
             'hidapi not available',
+            '',
             'pip install hidapi'
         ))
     else:
-        devices = enumerate_pointing_devices()
+        devices = enumerate_all_devices()
         if devices:
+            # Deduplicate by VID:PID (devices can have multiple interfaces)
+            seen = set()
             for d in devices:
-                name = d.product or d.manufacturer or "Unknown Device"
                 vid_pid = f"0x{d.vid:04X}:0x{d.pid:04X}"
-                tree.insert('', tk.END, values=(name, vid_pid))
+                name = d.product or d.manufacturer or "Unknown Device"
+                key = (name, vid_pid)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                device_type = "Mouse/Pointer" if d.is_pointing_device else "Other HID"
+                tree.insert('', tk.END, values=(name, device_type, vid_pid))
         else:
             tree.insert('', tk.END, values=(
-                'No pointing devices found',
+                'No HID devices found',
+                '',
                 ''
             ))
 
