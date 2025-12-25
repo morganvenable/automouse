@@ -150,9 +150,15 @@ def show_devices_dialog():
         # Update display
         tree.set(item_id, 'enabled', get_enabled_display(vidpid_key))
 
-        # Save config
-        save_config(config)
-        log.info(f"Toggled device {vidpid_key} enabled={config.known_devices[vidpid_key].enabled}")
+        # Save config in a deferred call to avoid Tkinter threading issues
+        def do_save():
+            try:
+                save_config(config)
+                log.info(f"Toggled device {vidpid_key} enabled={config.known_devices[vidpid_key].enabled}")
+            except Exception as e:
+                log.error(f"Failed to save config: {e}")
+
+        root.after(10, do_save)
 
     tree.bind('<Button-1>', toggle_enabled)
 
@@ -245,8 +251,14 @@ def show_devices_dialog():
                 name=name,
                 enabled=True
             )
-            save_config(config)
-            log.info(f"Added new known device: {vidpid_key} ({name})")
+            # Defer save to avoid threading issues
+            def do_save():
+                try:
+                    save_config(config)
+                    log.info(f"Added new known device: {vidpid_key} ({name})")
+                except Exception as e:
+                    log.error(f"Failed to save config: {e}")
+            root.after(10, do_save)
 
         return True  # First time seen
 
