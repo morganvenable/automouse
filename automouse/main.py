@@ -34,16 +34,59 @@ log = logging.getLogger(__name__)
 
 
 def show_devices_dialog():
-    """Show a GUI dialog with connected HID devices."""
+    """Show a GUI dialog with connected HID devices and live activity monitor."""
+    from pynput import mouse
+    import time
+
+    # Track activity
+    last_activity = [0.0]  # Use list for mutability in nested function
+    dialog_open = [True]
+
     # Create window
     root = tk.Tk()
     root.title("AutoMouse - HID Devices")
-    root.geometry("600x400")
+    root.geometry("600x450")
     root.resizable(True, True)
 
     # Create main frame with padding
     main_frame = ttk.Frame(root, padding="10")
     main_frame.pack(fill=tk.BOTH, expand=True)
+
+    # Live activity indicator frame
+    activity_frame = ttk.LabelFrame(main_frame, text="Live Mouse Activity", padding="10")
+    activity_frame.pack(fill=tk.X, pady=(0, 10))
+
+    activity_indicator = tk.Label(
+        activity_frame,
+        text="Move mouse to test...",
+        font=('Segoe UI', 11),
+        fg='gray'
+    )
+    activity_indicator.pack()
+
+    def on_mouse_activity(x, y):
+        last_activity[0] = time.time()
+
+    def update_indicator():
+        if not dialog_open[0]:
+            return
+        elapsed = time.time() - last_activity[0]
+        if elapsed < 0.3:
+            activity_indicator.config(text="MOUSE ACTIVE", fg='green', font=('Segoe UI', 11, 'bold'))
+        else:
+            activity_indicator.config(text="Waiting for mouse...", fg='gray', font=('Segoe UI', 11))
+        root.after(100, update_indicator)
+
+    # Start mouse listener for this dialog
+    mouse_listener = mouse.Listener(on_move=on_mouse_activity)
+    mouse_listener.start()
+
+    def on_close():
+        dialog_open[0] = False
+        mouse_listener.stop()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
 
     # Title label
     title = ttk.Label(main_frame, text="Connected HID Devices", font=('Segoe UI', 12, 'bold'))
@@ -51,7 +94,7 @@ def show_devices_dialog():
 
     # Create treeview for device list
     columns = ('name', 'type', 'vid_pid')
-    tree = ttk.Treeview(main_frame, columns=columns, show='headings', height=12)
+    tree = ttk.Treeview(main_frame, columns=columns, show='headings', height=10)
 
     tree.heading('name', text='Device Name')
     tree.heading('type', text='Type')
@@ -99,12 +142,12 @@ def show_devices_dialog():
             ))
 
     # Info label
-    info_text = "Note: AutoMouse uses pynput for mouse detection, which works with any mouse."
+    info_text = "Note: Your mouse may not appear in the list (Windows limitation), but detection works."
     info_label = ttk.Label(main_frame, text=info_text, font=('Segoe UI', 9), foreground='gray')
     info_label.pack(pady=(10, 0))
 
     # Close button
-    close_btn = ttk.Button(main_frame, text="Close", command=root.destroy)
+    close_btn = ttk.Button(main_frame, text="Close", command=on_close)
     close_btn.pack(pady=(10, 0))
 
     # Center window on screen
@@ -114,6 +157,9 @@ def show_devices_dialog():
     x = (root.winfo_screenwidth() // 2) - (width // 2)
     y = (root.winfo_screenheight() // 2) - (height // 2)
     root.geometry(f'{width}x{height}+{x}+{y}')
+
+    # Start the activity indicator update loop
+    update_indicator()
 
     # Run dialog
     root.mainloop()
