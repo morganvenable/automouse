@@ -42,13 +42,33 @@ def check_requirements():
         print("✗ Nuitka not found. Install with: pip install nuitka ordered-set zstandard")
         return False
 
-    # Check if we have a C compiler
-    if shutil.which("gcc") or shutil.which("cl"):
-        print("✓ C compiler found")
+    # Check if we have a C compiler in PATH
+    # Note: Nuitka can find compilers not in PATH and can download MinGW automatically
+    if shutil.which("gcc"):
+        print("✓ GCC found in PATH")
+    elif shutil.which("cl"):
+        print("✓ MSVC (cl.exe) found in PATH")
     else:
-        print("⚠ No C compiler found. Install MinGW-w64 or Visual Studio Build Tools")
-        print("  MinGW-w64: https://www.mingw-w64.org/downloads/")
-        return False
+        # Check common locations
+        common_paths = [
+            Path("C:/msys64/mingw64/bin/gcc.exe"),
+            Path("C:/msys64/ucrt64/bin/gcc.exe"),
+            Path("C:/mingw64/bin/gcc.exe"),
+            Path("C:/MinGW/bin/gcc.exe"),
+        ]
+        found = None
+        for p in common_paths:
+            if p.exists():
+                found = p
+                break
+
+        if found:
+            print(f"✓ GCC found at {found}")
+            print(f"  (Consider adding {found.parent} to your PATH)")
+        else:
+            print("⚠ No C compiler found in PATH or common locations")
+            print("  Nuitka will attempt to download MinGW automatically...")
+            print("  (Or install MSYS2 and run: pacman -S mingw-w64-ucrt-x86_64-gcc)")
 
     return True
 
@@ -96,7 +116,8 @@ def build():
         # Follow imports
         "--follow-imports",
 
-        # Disable some things that trigger AV
+        # Compiler settings - use MinGW (downloads automatically if needed)
+        "--mingw64",
         "--assume-yes-for-downloads",  # Auto-download dependencies
 
         # Plugin for tk/tcl (needed for tkinter dialogs)
