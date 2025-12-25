@@ -5,6 +5,7 @@ Uses pynput for cross-platform keyboard hooks and event injection.
 """
 
 import logging
+import queue
 import threading
 from typing import Callable, Dict, Optional, Set
 from enum import Enum, auto
@@ -75,6 +76,10 @@ class KeyboardController:
     - Mapped keys are intercepted and converted to mouse actions
     - Unmapped keys can optionally exit the layer
     - Modifier keys pass through to combine with mouse actions
+
+    IMPORTANT: On Windows, keyboard hooks must return very quickly.
+    All slow operations (mouse actions, callbacks) are dispatched to
+    a worker thread via a queue.
     """
 
     def __init__(self):
@@ -92,7 +97,10 @@ class KeyboardController:
         self._on_mapped_key: Optional[Callable[[], None]] = None
         self._on_unmapped_key: Optional[Callable[[], None]] = None
 
-        self._lock = threading.RLock()
+        # Action queue for async processing (keyboard hooks must return fast!)
+        self._action_queue: queue.Queue = queue.Queue()
+        self._worker_thread: Optional[threading.Thread] = None
+        self._running = False
 
     def set_mappings(self, mappings: Dict[str, str]):
         """
@@ -120,13 +128,12 @@ class KeyboardController:
 
     def set_layer_active(self, active: bool):
         """Set whether the mouse layer is currently active."""
-        with self._lock:
-            if self._layer_active != active:
-                self._layer_active = active
-                log.info(f"Layer active: {active}")
-                if not active:
-                    # Release any suppressed keys
-                    self._suppressed_keys.clear()
+        if self._layer_active != active:
+            self._layer_active = active
+            log.info(f"Layer active: {active}")
+            if not active:
+                # Release any suppressed keys
+                self._suppressed_keys.clear()
 
     def set_exit_on_unmapped(self, exit_on_unmapped: bool):
         """Set whether unmapped keys exit the layer."""
@@ -140,13 +147,13 @@ class KeyboardController:
         """
         Handle key press events.
 
-        Returns False to suppress the key, True to pass through.
-        NOTE: With suppress=True, we must explicitly return for every key.
+        CRITICAL: This runs in the keyboard hook thread on Windows.
+        Must return IMMEDIATELY - no blocking operations allowed.
         """
-        key_str = key_to_string(key)
-        log.debug(f"Key press: {key} -> '{key_str}' (layer_active={self._layer_active})")
+        try:
+            key_str = key_to_string(key)
+            log.debug(f"Key press: {key} -> '{key_str}' (layer_active={self._layer_active})")
 
-        with self._lock:
             # Always pass through if layer not active
             if not self._layer_active:
                 return True
@@ -162,15 +169,12 @@ class KeyboardController:
                 self._suppressed_keys.add(key_str)
                 log.info(f"Mapped key '{key_str}' -> {action.name}, suppressing")
 
-                # Notify callback
-                if self._on_mapped_key:
-                    try:
-                        self._on_mapped_key()
-                    except Exception as e:
-                        log.error(f"Error in mapped_key callback: {e}")
+                # Queue the mouse action (non-blocking!)
+                self._action_queue.put(('mouse_press', action))
 
-                # Perform the mouse action
-                self._do_mouse_action(action, pressed=True)
+                # Queue the callback (non-blocking!)
+                if self._on_mapped_key:
+                    self._action_queue.put(('callback', self._on_mapped_key))
 
                 return False  # Suppress the key
 
@@ -178,29 +182,65 @@ class KeyboardController:
                 # Unmapped key
                 log.debug(f"Unmapped key '{key_str}', passing through")
                 if self._exit_on_unmapped and self._on_unmapped_key:
-                    try:
-                        self._on_unmapped_key()
-                    except Exception as e:
-                        log.error(f"Error in unmapped_key callback: {e}")
+                    self._action_queue.put(('callback', self._on_unmapped_key))
                 return True  # Pass through
+
+        except Exception as e:
+            log.error(f"Error in key press handler: {e}")
+            return True  # Pass through on error
 
     def _on_key_release(self, key):
         """Handle key release events."""
-        key_str = key_to_string(key)
+        try:
+            key_str = key_to_string(key)
+            log.debug(f"Key release: {key} -> '{key_str}'")
 
-        with self._lock:
             if key_str and key_str in self._suppressed_keys:
                 self._suppressed_keys.discard(key_str)
                 log.debug(f"Releasing suppressed key '{key_str}'")
 
-                # Release mouse button if applicable
+                # Queue mouse button release
                 action = self._mappings.get(key_str)
                 if action:
-                    self._do_mouse_action(action, pressed=False)
+                    self._action_queue.put(('mouse_release', action))
 
                 return False  # Suppress the release too
 
-        return True  # Pass through
+            return True  # Pass through
+
+        except Exception as e:
+            log.error(f"Error in key release handler: {e}")
+            return True
+
+    def _worker_loop(self):
+        """Worker thread that processes mouse actions and callbacks."""
+        log.info("Action worker thread started")
+        while self._running:
+            try:
+                # Wait for action with timeout (allows clean shutdown)
+                try:
+                    action = self._action_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+
+                action_type = action[0]
+
+                if action_type == 'mouse_press':
+                    self._do_mouse_action(action[1], pressed=True)
+                elif action_type == 'mouse_release':
+                    self._do_mouse_action(action[1], pressed=False)
+                elif action_type == 'callback':
+                    try:
+                        action[1]()
+                    except Exception as e:
+                        log.error(f"Error in callback: {e}")
+
+                self._action_queue.task_done()
+
+            except Exception as e:
+                log.error(f"Error in worker loop: {e}")
+
+        log.info("Action worker thread stopped")
 
     def _do_mouse_action(self, action: MouseAction, pressed: bool):
         """Perform a mouse action."""
@@ -232,33 +272,30 @@ class KeyboardController:
 
     def _on_mouse_move(self, x, y):
         """Handle mouse movement."""
-        # Don't log every movement - too noisy
+        # Queue the callback (don't block the mouse listener either)
         if self._on_mouse_activity:
-            try:
-                self._on_mouse_activity()
-            except Exception as e:
-                log.error(f"Error in mouse_activity callback: {e}")
+            self._action_queue.put(('callback', self._on_mouse_activity))
 
     def _on_mouse_click(self, x, y, button, pressed):
         """Handle mouse clicks."""
         log.debug(f"Mouse click: {button} pressed={pressed} at ({x}, {y})")
         if self._on_mouse_activity:
-            try:
-                self._on_mouse_activity()
-            except Exception as e:
-                log.error(f"Error in mouse_activity callback: {e}")
+            self._action_queue.put(('callback', self._on_mouse_activity))
 
     def _on_mouse_scroll(self, x, y, dx, dy):
         """Handle mouse scroll."""
         log.debug(f"Mouse scroll: dx={dx} dy={dy} at ({x}, {y})")
         if self._on_mouse_activity:
-            try:
-                self._on_mouse_activity()
-            except Exception as e:
-                log.error(f"Error in mouse_activity callback: {e}")
+            self._action_queue.put(('callback', self._on_mouse_activity))
 
     def start(self):
         """Start keyboard and mouse listeners."""
+        self._running = True
+
+        # Start worker thread first
+        self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self._worker_thread.start()
+
         log.info("Starting keyboard listener with suppress=True")
 
         # Keyboard listener - suppress=True is required on Windows to actually
@@ -283,6 +320,8 @@ class KeyboardController:
     def stop(self):
         """Stop listeners."""
         log.info("Stopping listeners")
+        self._running = False
+
         if self._keyboard_listener:
             self._keyboard_listener.stop()
             self._keyboard_listener = None
@@ -290,4 +329,9 @@ class KeyboardController:
         if self._mouse_listener:
             self._mouse_listener.stop()
             self._mouse_listener = None
+
+        if self._worker_thread:
+            self._worker_thread.join(timeout=1.0)
+            self._worker_thread = None
+
         log.info("Listeners stopped")
