@@ -6,6 +6,8 @@ import sys
 import os
 import logging
 import threading
+import tkinter as tk
+from tkinter import ttk
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +31,90 @@ logging.basicConfig(
     datefmt='%H:%M:%S'
 )
 log = logging.getLogger(__name__)
+
+
+def show_devices_dialog():
+    """Show a GUI dialog with connected HID devices."""
+    # Create window
+    root = tk.Tk()
+    root.title("AutoMouse - Connected Devices")
+    root.geometry("600x400")
+    root.resizable(True, True)
+
+    # Create main frame with padding
+    main_frame = ttk.Frame(root, padding="10")
+    main_frame.pack(fill=tk.BOTH, expand=True)
+
+    # Title label
+    title = ttk.Label(main_frame, text="Connected HID Devices", font=('Segoe UI', 12, 'bold'))
+    title.pack(pady=(0, 10))
+
+    # Create treeview for device list
+    columns = ('name', 'type', 'vid_pid', 'usage')
+    tree = ttk.Treeview(main_frame, columns=columns, show='headings', height=12)
+
+    tree.heading('name', text='Device Name')
+    tree.heading('type', text='Type')
+    tree.heading('vid_pid', text='VID:PID')
+    tree.heading('usage', text='Usage Page:Usage')
+
+    tree.column('name', width=250)
+    tree.column('type', width=100)
+    tree.column('vid_pid', width=100)
+    tree.column('usage', width=120)
+
+    # Add scrollbar
+    scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL, command=tree.yview)
+    tree.configure(yscrollcommand=scrollbar.set)
+
+    # Pack tree and scrollbar
+    tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+    # Populate device list
+    if not HID_AVAILABLE:
+        tree.insert('', tk.END, values=(
+            'hidapi not available',
+            'Install with: pip install hidapi',
+            '',
+            ''
+        ))
+    else:
+        devices = enumerate_all_devices()
+        if devices:
+            for d in devices:
+                device_type = "POINTING" if d.is_pointing_device else "Other"
+                name = d.product or d.manufacturer or "Unknown Device"
+                vid_pid = f"0x{d.vid:04X}:0x{d.pid:04X}"
+                usage = f"0x{d.usage_page:04X}:0x{d.usage:02X}"
+                tree.insert('', tk.END, values=(name, device_type, vid_pid, usage))
+        else:
+            tree.insert('', tk.END, values=(
+                'No HID devices found',
+                '',
+                '',
+                ''
+            ))
+
+    # Info label
+    info_text = "Note: AutoMouse uses pynput for mouse detection, which works with any mouse."
+    info_label = ttk.Label(main_frame, text=info_text, font=('Segoe UI', 9), foreground='gray')
+    info_label.pack(pady=(10, 0))
+
+    # Close button
+    close_btn = ttk.Button(main_frame, text="Close", command=root.destroy)
+    close_btn.pack(pady=(10, 0))
+
+    # Center window on screen
+    root.update_idletasks()
+    width = root.winfo_width()
+    height = root.winfo_height()
+    x = (root.winfo_screenwidth() // 2) - (width // 2)
+    y = (root.winfo_screenheight() // 2) - (height // 2)
+    root.geometry(f'{width}x{height}+{x}+{y}')
+
+    # Run dialog
+    root.mainloop()
 
 
 class AutoMouse:
@@ -172,35 +258,8 @@ class AutoMouse:
             log.info("Configuration reloaded")
 
         def show_devices(icon, item):
-            log.info("=" * 60)
-            log.info("HID DEVICE ENUMERATION")
-            log.info("=" * 60)
-
-            try:
-                if not HID_AVAILABLE:
-                    log.warning("hidapi not available. Install with: pip install hidapi")
-                    log.warning("On Windows, you may also need to install hidapi DLL.")
-                else:
-                    # Show all HID devices
-                    all_devices = enumerate_all_devices()
-                    if all_devices:
-                        log.info(f"Found {len(all_devices)} HID devices:")
-                        for d in all_devices:
-                            is_mouse = d.is_pointing_device
-                            marker = " [POINTING DEVICE]" if is_mouse else ""
-                            name = d.product or d.manufacturer or "Unknown"
-                            log.info(f"  {name}{marker}")
-                            log.info(f"    VID:0x{d.vid:04X} PID:0x{d.pid:04X}")
-                            log.info(f"    Usage Page: 0x{d.usage_page:04X} Usage: 0x{d.usage:02X}")
-                    else:
-                        log.info("No HID devices found.")
-                        log.info("This may be normal on Windows - mice are often exclusively owned by the OS.")
-
-                log.info("Note: AutoMouse uses pynput for mouse activity detection,")
-                log.info("which works with any mouse without needing raw HID access.")
-                log.info("=" * 60)
-            except Exception as e:
-                log.error(f"Error in show_devices: {e}")
+            # Run dialog in a separate thread to not block the tray
+            threading.Thread(target=show_devices_dialog, daemon=True).start()
 
         def quit_app(icon, item):
             log.info("Quit requested from tray menu")
