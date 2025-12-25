@@ -35,14 +35,17 @@ log = logging.getLogger(__name__)
 
 def show_devices_dialog():
     """Show a GUI dialog with connected HID devices and live per-device activity monitor."""
-    from pynput import mouse
     import time
+    import re
+    import sys
 
     # Track activity per device - key is tree item id, value is last activity time
     device_activity = {}  # {item_id: last_activity_time}
-    global_activity = [0.0]  # Fallback for non-HID-readable devices
     dialog_open = [True]
-    hid_readers = []  # List of (device_handle, item_id) for cleanup
+    raw_input_monitor = None
+
+    # Mapping from VID:PID to tree item id
+    vidpid_to_item = {}  # {"046D:C52B": item_id}
 
     # Create window
     root = tk.Tk()
@@ -92,26 +95,12 @@ def show_devices_dialog():
     tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-    # Track which devices we can read from
-    readable_devices = {}  # {item_id: hid_handle}
-    # Track which items are pointing devices (for fallback highlighting)
-    pointing_device_items = set()
+    # Debug status label
+    debug_var = tk.StringVar(value="Initializing...")
+    debug_label = tk.Label(main_frame, textvariable=debug_var, font=('Consolas', 9), fg='blue')
+    debug_label.pack(pady=(5, 0))
 
-    def try_open_hid_device(path):
-        """Try to open a HID device for reading."""
-        if not HID_AVAILABLE:
-            return None
-        try:
-            import hid
-            device = hid.device()
-            device.open_path(path)
-            device.set_nonblocking(True)
-            return device
-        except Exception as e:
-            log.debug(f"Cannot open HID device for reading: {e}")
-            return None
-
-    # Populate with ALL HID devices, marking pointing devices
+    # Populate with ALL HID devices
     if not HID_AVAILABLE:
         tree.insert('', tk.END, values=(
             '',
@@ -123,7 +112,6 @@ def show_devices_dialog():
         devices = enumerate_all_devices()
         if devices:
             # Deduplicate by VID:PID (devices can have multiple interfaces)
-            # But keep track of all paths for a device
             device_map = {}  # (name, vid_pid) -> [device_objects]
             for d in devices:
                 vid_pid = f"0x{d.vid:04X}:0x{d.pid:04X}"
@@ -141,20 +129,13 @@ def show_devices_dialog():
                 item_id = tree.insert('', tk.END, values=('', name, device_type, vid_pid))
                 device_activity[item_id] = 0.0
 
-                # Track pointing devices for fallback highlighting
-                if is_pointer:
-                    pointing_device_items.add(item_id)
-                    log.info(f"Registered pointing device for activity tracking: {name}")
-
-                # Try to open any of the device's interfaces for reading
-                for d in dev_list:
-                    if d.is_pointing_device:
-                        handle = try_open_hid_device(d.path)
-                        if handle:
-                            readable_devices[item_id] = handle
-                            hid_readers.append((handle, item_id))
-                            log.info(f"Opened HID device for raw activity monitoring: {name}")
-                            break
+                # Map VID:PID (without 0x prefix, uppercase) to item for Raw Input matching
+                # vid_pid is like "0x046D:0x0C52" -> we want "046D:C052"
+                vid = dev_list[0].vid
+                pid = dev_list[0].pid
+                vidpid_key = f"{vid:04X}:{pid:04X}"
+                vidpid_to_item[vidpid_key] = item_id
+                log.debug(f"Mapped {vidpid_key} -> {item_id} ({name})")
         else:
             tree.insert('', tk.END, values=(
                 '',
@@ -163,36 +144,27 @@ def show_devices_dialog():
                 ''
             ))
 
-    def poll_hid_devices():
-        """Poll readable HID devices for activity."""
-        if not dialog_open[0]:
-            return
+    def on_raw_input_activity(device_path: str):
+        """Called when Raw Input detects activity on a specific device."""
+        # Extract VID and PID from path like \\?\HID#VID_046D&PID_C52B&...
+        match = re.search(r'VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})', device_path)
+        if match:
+            vidpid_key = f"{match.group(1).upper()}:{match.group(2).upper()}"
+            if vidpid_key in vidpid_to_item:
+                item_id = vidpid_to_item[vidpid_key]
+                device_activity[item_id] = time.time()
 
-        for item_id, handle in list(readable_devices.items()):
-            try:
-                # Try to read data (non-blocking)
-                data = handle.read(64)
-                if data:
-                    device_activity[item_id] = time.time()
-            except Exception as e:
-                log.debug(f"HID read error: {e}")
-                # Device may have been disconnected
-                try:
-                    handle.close()
-                except:
-                    pass
-                readable_devices.pop(item_id, None)
-
-        root.after(10, poll_hid_devices)  # Poll every 10ms
-
-    # Debug status label
-    debug_var = tk.StringVar(value="Initializing...")
-    debug_label = tk.Label(main_frame, textvariable=debug_var, font=('Consolas', 9), fg='blue')
-    debug_label.pack(pady=(5, 0))
-
-    def on_mouse_activity(x, y):
-        """Fallback activity detection via pynput."""
-        global_activity[0] = time.time()
+    # Try to use Windows Raw Input API for per-device detection
+    if sys.platform == 'win32':
+        try:
+            from .rawinput import RawInputMonitor
+            raw_input_monitor = RawInputMonitor(on_raw_input_activity)
+            raw_input_monitor.start()
+            log.info("Started Windows Raw Input monitor for per-device activity detection")
+            debug_var.set("Using Windows Raw Input API - move your mouse!")
+        except Exception as e:
+            log.warning(f"Failed to start Raw Input monitor: {e}")
+            debug_var.set(f"Raw Input failed: {e}")
 
     def update_display():
         """Update the activity display for all devices."""
@@ -200,54 +172,41 @@ def show_devices_dialog():
             return
 
         now = time.time()
-        mouse_active = (now - global_activity[0]) < 0.3
-
-        # Debug info - show device types
-        types = [tree.item(i, 'values')[2] for i in device_activity]
-        debug_var.set(f"active={mouse_active}, ptrs={len(pointing_device_items)}, types={types}")
+        active_count = 0
 
         for item_id in device_activity:
             try:
-                hid_elapsed = now - device_activity.get(item_id, 0)
+                elapsed = now - device_activity.get(item_id, 0)
 
-                # If we have HID-level activity for this specific device
-                if item_id in readable_devices and hid_elapsed < 0.3:
+                if elapsed < 0.3:
                     tree.item(item_id, tags=('active',))
                     tree.set(item_id, 'activity', '● ACTIVE')
-                # Fallback: show global mouse activity on pointing devices we can't read directly
-                elif item_id not in readable_devices and item_id in pointing_device_items and mouse_active:
-                    tree.item(item_id, tags=('active',))
-                    tree.set(item_id, 'activity', '● ACTIVE')
+                    active_count += 1
                 else:
                     tree.item(item_id, tags=('inactive',))
                     tree.set(item_id, 'activity', '')
             except Exception as e:
                 log.warning(f"Display update error: {e}")
 
-        root.after(50, update_display)
+        # Update debug with activity status
+        if raw_input_monitor:
+            debug_var.set(f"Raw Input active, {len(vidpid_to_item)} devices mapped, {active_count} active now")
 
-    # Start mouse listener for fallback activity detection
-    mouse_listener = mouse.Listener(on_move=on_mouse_activity)
-    mouse_listener.start()
+        root.after(50, update_display)
 
     def on_close():
         dialog_open[0] = False
-        mouse_listener.stop()
-        # Close all HID handles
-        for handle, _ in hid_readers:
-            try:
-                handle.close()
-            except:
-                pass
+        if raw_input_monitor:
+            raw_input_monitor.stop()
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)
 
     # Info label
-    if readable_devices:
-        info_text = "Per-device activity monitoring active. Move your mouse to see which device is active."
+    if sys.platform == 'win32':
+        info_text = "Using Windows Raw Input API for per-device activity detection."
     else:
-        info_text = "Note: Raw HID access not available. Showing global mouse activity on pointing devices."
+        info_text = "Per-device detection only available on Windows."
     info_label = ttk.Label(main_frame, text=info_text, font=('Segoe UI', 9), foreground='gray')
     info_label.pack(pady=(10, 0))
 
@@ -263,8 +222,7 @@ def show_devices_dialog():
     y = (root.winfo_screenheight() // 2) - (height // 2)
     root.geometry(f'{width}x{height}+{x}+{y}')
 
-    # Start the polling and display update loops
-    poll_hid_devices()
+    # Start the display update loop
     update_display()
 
     # Run dialog
