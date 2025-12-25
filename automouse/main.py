@@ -22,7 +22,7 @@ except ImportError:
 from .config import load_config, get_config_path, Config
 from .state import LayerStateMachine, LayerState, StateChange
 from .keyboard import KeyboardController
-from .hid_monitor import enumerate_pointing_devices, enumerate_all_devices, HID_AVAILABLE
+from .hid_monitor import enumerate_pointing_devices, HID_AVAILABLE
 
 # Configure logging
 logging.basicConfig(
@@ -34,11 +34,11 @@ log = logging.getLogger(__name__)
 
 
 def show_devices_dialog():
-    """Show a GUI dialog with connected HID devices."""
+    """Show a GUI dialog with connected pointing devices."""
     # Create window
     root = tk.Tk()
-    root.title("AutoMouse - Connected Devices")
-    root.geometry("600x400")
+    root.title("AutoMouse - Pointing Devices")
+    root.geometry("500x300")
     root.resizable(True, True)
 
     # Create main frame with padding
@@ -46,22 +46,18 @@ def show_devices_dialog():
     main_frame.pack(fill=tk.BOTH, expand=True)
 
     # Title label
-    title = ttk.Label(main_frame, text="Connected HID Devices", font=('Segoe UI', 12, 'bold'))
+    title = ttk.Label(main_frame, text="Connected Pointing Devices", font=('Segoe UI', 12, 'bold'))
     title.pack(pady=(0, 10))
 
     # Create treeview for device list
-    columns = ('name', 'type', 'vid_pid', 'usage')
-    tree = ttk.Treeview(main_frame, columns=columns, show='headings', height=12)
+    columns = ('name', 'vid_pid')
+    tree = ttk.Treeview(main_frame, columns=columns, show='headings', height=8)
 
     tree.heading('name', text='Device Name')
-    tree.heading('type', text='Type')
     tree.heading('vid_pid', text='VID:PID')
-    tree.heading('usage', text='Usage Page:Usage')
 
-    tree.column('name', width=250)
-    tree.column('type', width=100)
-    tree.column('vid_pid', width=100)
-    tree.column('usage', width=120)
+    tree.column('name', width=350)
+    tree.column('vid_pid', width=120)
 
     # Add scrollbar
     scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL, command=tree.yview)
@@ -71,28 +67,22 @@ def show_devices_dialog():
     tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-    # Populate device list
+    # Populate with ONLY pointing devices (mice, trackballs)
     if not HID_AVAILABLE:
         tree.insert('', tk.END, values=(
             'hidapi not available',
-            'Install with: pip install hidapi',
-            '',
-            ''
+            'pip install hidapi'
         ))
     else:
-        devices = enumerate_all_devices()
+        devices = enumerate_pointing_devices()
         if devices:
             for d in devices:
-                device_type = "POINTING" if d.is_pointing_device else "Other"
                 name = d.product or d.manufacturer or "Unknown Device"
                 vid_pid = f"0x{d.vid:04X}:0x{d.pid:04X}"
-                usage = f"0x{d.usage_page:04X}:0x{d.usage:02X}"
-                tree.insert('', tk.END, values=(name, device_type, vid_pid, usage))
+                tree.insert('', tk.END, values=(name, vid_pid))
         else:
             tree.insert('', tk.END, values=(
-                'No HID devices found',
-                '',
-                '',
+                'No pointing devices found',
                 ''
             ))
 
